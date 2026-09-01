@@ -189,7 +189,12 @@ class ApiTestCase(unittest.TestCase):
                 self.assertTrue(response.get_json()["completed"])
                 saved = response.get_json()["annotations"][0]
                 self.assertNotIn("instanceId", saved)
-                self.assertEqual(saved["metadata"].get("identity_id"), "person-1")
+                if mode == "reid":
+                    self.assertEqual(saved.get("identity_id"), "person-1")
+                    self.assertEqual(saved.get("track_id"), "track-1")
+                    self.assertTrue({"identity_id", "track_id", "camera_id", "video_id", "frame_id"}.issubset(saved))
+                    self.assertNotIn("identity_id", saved["metadata"])
+                    self.assertNotIn("track_id", saved["metadata"])
                 self.assertFalse((directory / "exports").exists())
 
 

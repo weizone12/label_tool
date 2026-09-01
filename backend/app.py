@@ -741,18 +741,12 @@ def normalized_annotations(items, expected_mode: str, valid_ids: set[str] | None
         if not isinstance(geometry, dict):
             continue
         metadata = dict(item.get("metadata", {})) if isinstance(item.get("metadata"), dict) else {}
-        for old_key, new_key in (("identity", "identity_id"), ("trackId", "track_id"), ("cameraId", "camera_id"), ("videoId", "video_id"), ("frame", "frame_id"), ("createdAt", "created_at")):
+        for old_key, new_key in (("createdAt", "created_at"),):
             if old_key in item and new_key not in metadata:
                 metadata[new_key] = item[old_key]
         for key in ("hidden", "locked", "keyframe"):
             if key in item and key not in metadata:
                 metadata[key] = item[key]
-        if mode == "reid":
-            metadata.setdefault("identity_id", "")
-            metadata.setdefault("track_id", "")
-            metadata.setdefault("camera_id", "")
-            metadata.setdefault("video_id", "")
-            metadata.setdefault("frame_id", None)
         annotation = {
             "id": item.get("id"),
             "mode": mode,
@@ -761,6 +755,19 @@ def normalized_annotations(items, expected_mode: str, valid_ids: set[str] | None
             "attributes": item.get("attributes", {}) if isinstance(item.get("attributes"), dict) else {},
             "metadata": metadata,
         }
+        if mode == "reid":
+            legacy_names = {
+                "identity_id": "identity",
+                "track_id": "trackId",
+                "camera_id": "cameraId",
+                "video_id": "videoId",
+                "frame_id": "frame",
+            }
+            for field, legacy_field in legacy_names.items():
+                value = item.get(field, item.get(legacy_field, metadata.pop(field, None)))
+                if field != "identity_id" and value == "":
+                    value = None
+                annotation[field] = value
         try:
             annotation["id"] = str(uuid.UUID(str(annotation.get("id", ""))))
         except ValueError:

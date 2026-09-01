@@ -226,7 +226,7 @@ export default function Workspace({ project: initialProject, onExit }) {
     const enriched = {
       ...annotation,
       ...(currentImage?.mediaType === 'video' ? { frame_id: currentFrame, keyframe: true } : {}),
-      ...(tool === 'reid' ? { identity_id: '', track_id: '', camera_id: '', video_id: '' } : {}),
+      ...(tool === 'reid' ? { identity_id: '', track_id: null, camera_id: null, video_id: null, frame_id: currentImage?.mediaType === 'video' ? currentFrame : null } : {}),
     }
     commit((current) => ({ ...current, annotations: [...current.annotations, enriched] }))
     setSelectedId(enriched.id)

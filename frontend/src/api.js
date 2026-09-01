@@ -28,6 +28,13 @@ const toEditorAnnotation = (annotation) => ({
   points: geometryPoints(annotation),
   attributes: annotation.attributes || {},
   ...(annotation.metadata || {}),
+  ...(['reid'].includes(annotation.mode) ? {
+    identity_id: annotation.identity_id,
+    track_id: annotation.track_id,
+    camera_id: annotation.camera_id,
+    video_id: annotation.video_id,
+    frame_id: annotation.frame_id,
+  } : {}),
 })
 
 const toStoredAnnotation = (annotation) => {
@@ -42,10 +49,19 @@ const toStoredAnnotation = (annotation) => {
     geometry = { points: points.map(({ x, y }) => [x, y]) }
   }
   const metadata = { ...(annotation.metadata || {}) }
-  for (const key of ['hidden', 'locked', 'created_at', 'identity_id', 'track_id', 'camera_id', 'video_id', 'frame_id', 'keyframe']) {
+  for (const key of ['hidden', 'locked', 'created_at', 'keyframe']) {
     if (annotation[key] !== undefined) metadata[key] = annotation[key]
   }
-  return { id: annotation.id, mode: annotation.type, label_id: annotation.labelId, geometry, attributes: annotation.attributes || {}, metadata }
+  const stored = { id: annotation.id, mode: annotation.type, label_id: annotation.labelId, geometry, attributes: annotation.attributes || {}, metadata }
+  if (annotation.type === 'reid') {
+    stored.identity_id = annotation.identity_id ?? ''
+    stored.track_id = annotation.track_id || null
+    stored.camera_id = annotation.camera_id || null
+    stored.video_id = annotation.video_id || null
+    stored.frame_id = annotation.frame_id ?? null
+    for (const key of ['identity_id', 'track_id', 'camera_id', 'video_id', 'frame_id']) delete stored.metadata[key]
+  }
+  return stored
 }
 
 const toEditorDocument = (document) => ({ ...document, annotations: (document.annotations || []).map(toEditorAnnotation) })
