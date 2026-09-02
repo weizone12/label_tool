@@ -43,7 +43,20 @@ const editVertex = (item, vertexIndex, point) => {
   return item.points.map((current, index) => index === vertexIndex ? point : current)
 }
 
-export default function AnnotationCanvas({ image, imageUrl, annotations, labels, activeLabelId, tool, selectedId, onSelect, onCommit, onUpdate, resetToken, currentFrame = 0, onFrameChange }) {
+const nearestTimelineFrame = (timeline, time) => {
+  if (!timeline?.length) return Math.round(time * 30)
+  let low = 0, high = timeline.length - 1
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2)
+    if (timeline[middle].video_pts_s < time) low = middle + 1
+    else high = middle
+  }
+  const next = timeline[low]
+  const previous = timeline[Math.max(0, low - 1)]
+  return Math.abs(previous.video_pts_s - time) <= Math.abs(next.video_pts_s - time) ? previous.frame_index : next.frame_index
+}
+
+export default function AnnotationCanvas({ image, imageUrl, annotations, labels, activeLabelId, tool, selectedId, onSelect, onCommit, onUpdate, resetToken, currentFrame = 0, onFrameChange, readOnlyGeometry = false, frameTimeline = [], onVideoMetadata, overlayPoints = [] }) {
   const svgRef = useRef(null)
   const videoRef = useRef(null)
   const [view, setView] = useState({ x: 0, y: 0, zoom: 1 })
@@ -113,6 +126,10 @@ export default function AnnotationCanvas({ image, imageUrl, annotations, labels,
     }
     if (event.button !== 0) return
     const point = screenToImage(event)
+    if (readOnlyGeometry) {
+      selectAt(point, event.altKey)
+      return
+    }
     if (!draft.length && !event.shiftKey) {
       const selected = annotations.find((item) => item.id === selectedId && !item.hidden)
       const selectedPoints = selected ? annotationPoints(selected) : []
@@ -190,20 +207,21 @@ export default function AnnotationCanvas({ image, imageUrl, annotations, labels,
   return (
     <div className="canvas-wrap">
       <svg ref={svgRef} className={interaction?.type === 'pan' ? 'panning' : ''} viewBox={viewBox} preserveAspectRatio="xMidYMid meet" onPointerDown={handlePointerDown} onPointerMove={handlePointerMove} onPointerUp={handlePointerUp} onPointerLeave={() => setCursor(null)} onContextMenu={(event) => event.preventDefault()} onWheel={handleWheel} onDoubleClick={() => ['polygon', 'semantic_segmentation', 'instance_segmentation'].includes(tool) && draft.length >= 3 && finish(draft)}>
-        {image.mediaType === 'video' ? <foreignObject x="0" y="0" width={image.width || 1280} height={image.height || 720} style={{ pointerEvents: 'none' }}><video ref={videoRef} src={imageUrl} style={{ width: '100%', height: '100%', objectFit: 'contain' }} onTimeUpdate={(event) => onFrameChange?.(Math.round(event.currentTarget.currentTime * 30))} /></foreignObject> : <image href={imageUrl} x="0" y="0" width={image.width} height={image.height} />}
-        {renderedAnnotations.map((item) => <Shape key={item.id} item={item} color={labels.find((label) => label.id === item.labelId)?.color || '#fff'} selected={item.id === selectedId} zoom={view.zoom} />)}
+        {image.mediaType === 'video' ? <foreignObject x="0" y="0" width={image.width || 1280} height={image.height || 720} style={{ pointerEvents: 'none' }}><video ref={videoRef} src={imageUrl} style={{ width: '100%', height: '100%', objectFit: 'contain' }} onLoadedMetadata={(event) => onVideoMetadata?.({ width: event.currentTarget.videoWidth, height: event.currentTarget.videoHeight })} onTimeUpdate={(event) => onFrameChange?.(nearestTimelineFrame(frameTimeline, event.currentTarget.currentTime))} /></foreignObject> : <image href={imageUrl} x="0" y="0" width={image.width} height={image.height} />}
+        {renderedAnnotations.map((item) => <Shape key={item.id} item={item} color={labels.find((label) => label.id === item.labelId)?.color || '#fff'} selected={item.id === selectedId} zoom={view.zoom} readOnlyGeometry={readOnlyGeometry} />)}
+        {overlayPoints.map((point, index) => <g key={`${point.mmsi}-${index}`} pointerEvents="none"><circle cx={point.x} cy={point.y} r={7 / view.zoom} fill="#22d3ee" stroke="#fff" strokeWidth={2 / view.zoom} vectorEffect="non-scaling-stroke" /><line x1={point.x - 12 / view.zoom} y1={point.y} x2={point.x + 12 / view.zoom} y2={point.y} stroke="#22d3ee" strokeWidth={2 / view.zoom} vectorEffect="non-scaling-stroke" /><line x1={point.x} y1={point.y - 12 / view.zoom} x2={point.x} y2={point.y + 12 / view.zoom} stroke="#22d3ee" strokeWidth={2 / view.zoom} vectorEffect="non-scaling-stroke" /><text x={point.x + 11 / view.zoom} y={point.y - 11 / view.zoom} fill="#fff" stroke="#08111f" strokeWidth={3 / view.zoom} paintOrder="stroke" fontSize={14 / view.zoom} fontWeight="700">{point.mmsi}</text></g>)}
         {preview.length > 0 && (previewIsBox ? <polygon className="draft-shape" points={preview.map((p) => `${p.x},${p.y}`).join(' ')} strokeWidth={2 / view.zoom} vectorEffect="non-scaling-stroke" /> : <polyline className="draft-shape" points={preview.map((p) => `${p.x},${p.y}`).join(' ')} strokeWidth={2 / view.zoom} vectorEffect="non-scaling-stroke" />)}
         {draft.map((point, index) => <circle key={index} cx={point.x} cy={point.y} r={5 / view.zoom} className="vertex draft" />)}
       </svg>
       <div className="zoom-indicator">{Math.round(view.zoom * 100)}%</div>
       {draft.length > 0 && <div className="drawing-hint">{['polygon', 'semantic_segmentation', 'instance_segmentation'].includes(tool) ? '點擊新增頂點，Enter／雙擊完成，Esc 取消' : tool === 'rotated_rectangle' ? `${draft.length}/3 點` : tool === 'ocr' ? `${draft.length}/4 點` : `${draft.length}/2 點`}</div>}
-      {image.mediaType === 'video' && <div className="video-controls"><button onClick={() => { const video = videoRef.current; video.currentTime = Math.max(0, video.currentTime - 1 / 30) }}>◀格</button><button onClick={() => videoRef.current?.paused ? videoRef.current.play() : videoRef.current.pause()}>播放／暫停</button><button onClick={() => { const video = videoRef.current; video.currentTime += 1 / 30 }}>格▶</button><span>Frame {currentFrame}</span><input type="range" min="0" max={Math.max(1, Math.round((videoRef.current?.duration || 0) * 30))} value={currentFrame} onChange={(event) => { const frame = Number(event.target.value); videoRef.current.currentTime = frame / 30; onFrameChange?.(frame) }} /></div>}
+      {image.mediaType === 'video' && <div className="video-controls"><button onClick={() => { const video = videoRef.current; const timelineIndex = frameTimeline.findIndex((item) => item.frame_index === currentFrame); if (timelineIndex >= 0) video.currentTime = frameTimeline[Math.max(0, timelineIndex - 1)].video_pts_s; else video.currentTime = Math.max(0, video.currentTime - 1 / 30) }}>◀格</button><button onClick={() => videoRef.current?.paused ? videoRef.current.play() : videoRef.current.pause()}>播放／暫停</button><button onClick={() => { const video = videoRef.current; const timelineIndex = frameTimeline.findIndex((item) => item.frame_index === currentFrame); if (timelineIndex >= 0) video.currentTime = frameTimeline[Math.min(frameTimeline.length - 1, timelineIndex + 1)].video_pts_s; else video.currentTime += 1 / 30 }}>格▶</button><span>Frame {currentFrame}</span><input type="range" min="0" max={frameTimeline.length ? frameTimeline.length - 1 : Math.max(1, Math.round((videoRef.current?.duration || 0) * 30))} value={frameTimeline.length ? Math.max(0, frameTimeline.findIndex((item) => item.frame_index === currentFrame)) : currentFrame} onChange={(event) => { const value = Number(event.target.value); const timelineItem = frameTimeline[value]; const frame = timelineItem?.frame_index ?? value; videoRef.current.currentTime = timelineItem?.video_pts_s ?? frame / 30; onFrameChange?.(frame) }} /></div>}
     </div>
   )
 }
 
-function Shape({ item, color, selected, zoom }) {
+function Shape({ item, color, selected, zoom, readOnlyGeometry }) {
   const common = { fill: color, fillOpacity: selected ? 0.24 : 0.12, stroke: color, strokeWidth: (selected ? 3 : 2) / zoom, vectorEffect: 'non-scaling-stroke', className: selected ? 'annotation-shape selected' : 'annotation-shape' }
   const points = annotationPoints(item)
-  return <g>{['rectangle', 'reid'].includes(item.type) ? <rect x={Math.min(item.points[0].x, item.points[1].x)} y={Math.min(item.points[0].y, item.points[1].y)} width={Math.abs(item.points[1].x - item.points[0].x)} height={Math.abs(item.points[1].y - item.points[0].y)} {...common} /> : <polygon points={points.map((p) => `${p.x},${p.y}`).join(' ')} {...common} />}{selected && points.map((point, index) => <circle key={index} cx={point.x} cy={point.y} r={4 / zoom} fill="#fff" stroke={color} strokeWidth={2 / zoom} />)}</g>
+  return <g>{['rectangle', 'reid'].includes(item.type) ? <rect x={Math.min(item.points[0].x, item.points[1].x)} y={Math.min(item.points[0].y, item.points[1].y)} width={Math.abs(item.points[1].x - item.points[0].x)} height={Math.abs(item.points[1].y - item.points[0].y)} {...common} /> : <polygon points={points.map((p) => `${p.x},${p.y}`).join(' ')} {...common} />}{selected && !readOnlyGeometry && points.map((point, index) => <circle key={index} cx={point.x} cy={point.y} r={4 / zoom} fill="#fff" stroke={color} strokeWidth={2 / zoom} />)}</g>
 }

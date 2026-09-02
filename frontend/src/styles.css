@@ -120,9 +120,9 @@ h1, h2, p { margin-top: 0; }
 .inspector-panel { border-right: 0; border-left: 1px solid var(--line); padding: 16px; }
 .inspector-panel section { padding-bottom: 17px; margin-bottom: 17px; border-bottom: 1px solid var(--line); }
 .label-picker, .annotation-list, .classification-list { display: flex; flex-direction: column; gap: 5px; margin-top: 9px; }
-.label-choice, .annotation-list button { border: 1px solid transparent; background: transparent; border-radius: 6px; padding: 8px; display: flex; gap: 8px; align-items: center; text-align: left; cursor: pointer; }
-.label-choice:hover, .annotation-list button:hover { background: #172130; }
-.label-choice.active, .annotation-list button.active { background: var(--accent-soft); border-color: rgba(45,212,191,.3); }
+.label-choice, .annotation-list-item > button { width: 100%; border: 1px solid transparent; background: transparent; border-radius: 6px; padding: 8px; display: flex; gap: 8px; align-items: center; text-align: left; cursor: pointer; }
+.label-choice:hover, .annotation-list-item > button:hover { background: #172130; }
+.label-choice.active, .annotation-list-item > button.active { background: var(--accent-soft); border-color: rgba(45,212,191,.3); }
 .label-picker i, .annotation-list i, .classification-list i { width: 10px; height: 10px; border-radius: 3px; flex: 0 0 auto; }
 .label-picker-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 4px; align-items: center; }
 .label-picker-row:has(> input) { grid-template-columns: minmax(0, 1fr) auto auto; }
@@ -147,8 +147,9 @@ h1, h2, p { margin-top: 0; }
 .attribute-summary button:hover { color: #fda4af; }
 .attribute-summary button:disabled { opacity: .4; cursor: not-allowed; }
 .annotation-list-section { min-height: 130px; }
-.annotation-list button span { flex: 1; display: flex; flex-direction: column; }
-.annotation-list button small { color: var(--muted); margin-top: 1px; }
+.annotation-list-item > button span { flex: 1; display: flex; flex-direction: column; }
+.annotation-list-item > button small { color: var(--muted); margin-top: 1px; }
+.annotation-list-item .selection-editor { margin: 4px 0 7px; padding: 12px; border: 1px solid #2b384b; border-radius: 7px; background: #0e1520; }
 .classification-list label { display: flex; align-items: center; gap: 8px; padding: 5px; font-size: 13px; cursor: pointer; }
 .selection-title { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
 .field.small { margin-bottom: 10px; gap: 5px; }

@@ -169,6 +169,19 @@ class ApiTestCase(unittest.TestCase):
                 response = self.client.post("/api/projects", json={"name": mode, "primaryMode": mode, "labels": []})
                 self.assertEqual(response.status_code, 201)
                 self.assertEqual(response.get_json()["primaryMode"], mode)
+                self.assertEqual(response.get_json()["projectType"], "annotation")
+
+    def test_editing_project_is_always_reid(self):
+        response = self.client.post("/api/projects", json={
+            "name": "pure editing", "projectType": "editing", "primaryMode": "rectangle",
+            "labels": [],
+        })
+        self.assertEqual(response.status_code, 201)
+        project = response.get_json()
+        self.assertEqual(project["projectType"], "editing")
+        self.assertEqual(project["primaryMode"], "reid")
+        self.assertEqual(project["mediaType"], "both")
+        self.assertEqual(project["labels"], [])
 
     def test_only_reid_accepts_video_input(self):
         reid = self.client.post("/api/projects", json={"name": "reid video", "primaryMode": "reid", "labels": [{"id": "person", "name": "person", "color": "#ff0000"}]}).get_json()
@@ -179,7 +192,21 @@ class ApiTestCase(unittest.TestCase):
             content_type="multipart/form-data",
         )
         self.assertEqual(response.status_code, 201)
-        self.assertEqual(response.get_json()[0]["mediaType"], "video")
+        video = response.get_json()[0]
+        self.assertEqual(video["mediaType"], "video")
+        editor_state = {
+            "reid_edit_only": True,
+            "bbox_source_name": "detections.jsonl",
+            "frame_timeline": [{"frame_index": 0, "video_pts_s": 0.0}],
+        }
+        response = self.client.put(
+            f"/api/projects/{reid['id']}/images/{video['id']}/annotation",
+            json={"annotations": [], "editor_state": editor_state},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["editor_state"], editor_state)
+        response = self.client.get(f"/api/projects/{reid['id']}/images/{video['id']}/annotation")
+        self.assertEqual(response.get_json()["editor_state"], editor_state)
 
         rectangle = self.client.post("/api/projects", json={"name": "rectangle image", "primaryMode": "rectangle", "labels": [{"id": "object", "name": "object", "color": "#00ff00"}]}).get_json()
         response = self.client.post(

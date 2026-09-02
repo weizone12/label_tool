@@ -9,6 +9,18 @@ const TOOL_NAMES = {
 }
 const LABEL_COLORS = ['#fb7185', '#f59e0b', '#84cc16', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6', '#ec4899']
 
+const classLabelId = (name, index) => name.trim().toLocaleLowerCase().replace(/[^\p{L}\p{N}_-]+/gu, '-').replace(/^[-_]+|[-_]+$/g, '') || `class-${index + 1}`
+
+const classColor = (index, total) => {
+  const hue = (index * 360 / Math.max(1, total)) % 360
+  const saturation = 0.72, lightness = 0.56
+  const chroma = (1 - Math.abs(2 * lightness - 1)) * saturation
+  const section = hue / 60, offset = chroma * (1 - Math.abs(section % 2 - 1))
+  const [red, green, blue] = section < 1 ? [chroma, offset, 0] : section < 2 ? [offset, chroma, 0] : section < 3 ? [0, chroma, offset] : section < 4 ? [0, offset, chroma] : section < 5 ? [offset, 0, chroma] : [chroma, 0, offset]
+  const match = lightness - chroma / 2
+  return `#${[red, green, blue].map((value) => Math.round((value + match) * 255).toString(16).padStart(2, '0')).join('')}`
+}
+
 const interpolateReidPoints = (before, after, ratio) => {
   const box = (item) => ({
     centerX: (item.points[0].x + item.points[1].x) / 2,
@@ -69,6 +81,7 @@ const annotationsAtFrame = (annotations, frame) => annotations.filter((item) => 
 
 export default function Workspace({ project: initialProject, onExit }) {
   const [project, setProject] = useState(initialProject)
+  const editingProject = project.projectType === 'editing'
   const [images, setImages] = useState([])
   const [index, setIndex] = useState(0)
   const [document, setDocument] = useState({ annotations: [], classifications: [], revision: 0 })
@@ -91,6 +104,11 @@ export default function Workspace({ project: initialProject, onExit }) {
   const [newAttributeType, setNewAttributeType] = useState('text')
   const [addingAttribute, setAddingAttribute] = useState(false)
   const [deletingDefinition, setDeletingDefinition] = useState('')
+  const [videoMetadata, setVideoMetadata] = useState(null)
+  const [importingBboxes, setImportingBboxes] = useState(false)
+  const [aisRecords, setAisRecords] = useState([])
+  const [selectedMmsi, setSelectedMmsi] = useState('')
+  const [aisSourceName, setAisSourceName] = useState('')
   
   // 👇 新增：上傳狀態與進度
   const [uploading, setUploading] = useState(false)
@@ -101,6 +119,8 @@ export default function Workspace({ project: initialProject, onExit }) {
   const ocrInputRef = useRef(null)
   const fileInputRef = useRef(null)
   const folderInputRef = useRef(null)
+  const bboxInputRef = useRef(null)
+  const aisInputRef = useRef(null)
   const filteredImages = images.filter((item) => progressFilter === 'all' || (progressFilter === 'completed' ? item.completed : !item.completed))
   const currentImage = filteredImages[index] || filteredImages[0]
 
@@ -127,7 +147,7 @@ export default function Workspace({ project: initialProject, onExit }) {
       if (cancelled) return
       const annotations = project.primaryMode === 'reid' && currentImage.mediaType === 'video' ? regenerateReidAnnotations(data.annotations) : data.annotations
       const materialized = { ...data, annotations }
-      setDocument(materialized); setPast([]); setFuture([]); setSelectedId(null); setCurrentFrame(0); setSaveState('已儲存')
+      setDocument(materialized); setPast([]); setFuture([]); setSelectedId(null); setCurrentFrame(0); setVideoMetadata(null); setAisRecords([]); setSelectedMmsi(''); setAisSourceName(''); setSaveState('已儲存')
       if (JSON.stringify(annotations) !== JSON.stringify(data.annotations)) {
         api.saveAnnotation(project.id, currentImage.id, materialized).then((saved) => {
           if (!cancelled) setDocument((current) => ({ ...current, revision: saved.revision, updatedAt: saved.updatedAt }))
@@ -184,13 +204,13 @@ export default function Workspace({ project: initialProject, onExit }) {
   }, [document, save])
 
   const deleteSelected = useCallback(() => {
-    if (!selectedId) return
+    if (!selectedId || editingProject) return
     commit((current) => {
       const annotations = current.annotations.filter((item) => item.id !== selectedId)
       return { ...current, annotations: tool === 'reid' ? regenerateReidAnnotations(annotations) : annotations }
     })
     setSelectedId(null)
-  }, [commit, selectedId, tool])
+  }, [commit, editingProject, selectedId, tool])
 
   const navigate = useCallback((delta) => {
     if (!filteredImages.length) return
@@ -270,6 +290,99 @@ export default function Workspace({ project: initialProject, onExit }) {
     event.target.value = ''
   }
 
+  const handleBboxJsonl = async (event) => {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file || importingBboxes || !editingProject || !currentImage || tool !== 'reid' || currentImage.mediaType !== 'video') return
+    if (document.annotations.length && !confirm('開啟 JSONL 會以檔案內的 bbox 取代這部影片目前的標註框，確定繼續？')) return
+    setImportingBboxes(true)
+    try {
+      const rows = (await file.text()).split(/\r?\n/).filter((line) => line.trim()).map((line, index) => {
+        try { return JSON.parse(line) } catch { throw new Error(`JSONL 第 ${index + 1} 行格式錯誤`) }
+      })
+      const validRows = rows.filter((row) => Number.isInteger(row.frame_index) && Array.isArray(row.detections))
+      if (!validRows.length) throw new Error('JSONL 中找不到有效的 frame_index 與 detections')
+      const classNames = [...new Set(validRows.flatMap((row) => row.detections.map((detection) => String(detection.class ?? '').trim() || '未分類')))]
+      const labels = [...project.labels]
+      const usedIds = new Set(labels.map((label) => label.id))
+      const labelIdByClass = new Map()
+      classNames.forEach((name, classIndex) => {
+        const color = classColor(classIndex, classNames.length)
+        const existingIndex = labels.findIndex((label) => label.name.trim().toLocaleLowerCase() === name.toLocaleLowerCase())
+        if (existingIndex >= 0) {
+          labels[existingIndex] = { ...labels[existingIndex], color }
+          labelIdByClass.set(name, labels[existingIndex].id)
+          return
+        }
+        const baseId = classLabelId(name, classIndex)
+        let id = baseId, suffix = 2
+        while (usedIds.has(id)) id = `${baseId}-${suffix++}`
+        usedIds.add(id)
+        labels.push({ id, name, color, attributes: [] })
+        labelIdByClass.set(name, id)
+      })
+      const updatedProject = await api.updateProject(project.id, { labels })
+      setProject(updatedProject)
+      setActiveLabelId(labelIdByClass.get(classNames[0]) || '')
+      if (!videoMetadata?.width || !videoMetadata?.height) throw new Error('影片資訊尚未載入完成，請稍後再試')
+      const sourceWidth = videoMetadata.width
+      const sourceHeight = videoMetadata.height
+      const scaleX = currentImage.width / sourceWidth
+      const scaleY = currentImage.height / sourceHeight
+      const now = new Date().toISOString()
+      const annotations = validRows.flatMap((row) => row.detections.flatMap((detection, detectionIndex) => {
+        if (detection.bbox_format !== 'xywh_top_left' || !Array.isArray(detection.bbox_xywh) || detection.bbox_xywh.length !== 4) return []
+        const [x, y, width, height] = detection.bbox_xywh.map(Number)
+        if (![x, y, width, height].every(Number.isFinite) || width <= 0 || height <= 0) return []
+        const detectionClass = String(detection.class ?? '').trim() || '未分類'
+        return [{
+          id: crypto.randomUUID(), type: 'reid', labelId: labelIdByClass.get(detectionClass),
+          points: [{ x: x * scaleX, y: y * scaleY }, { x: (x + width) * scaleX, y: (y + height) * scaleY }],
+          attributes: {}, identity_id: '', track_id: null, camera_id: null, video_id: null, frame_id: row.frame_index,
+          hidden: false, locked: false, keyframe: false, generated: false, created_at: now,
+          source_class: detection.class ?? null, confidence: detection.confidence ?? null, source_detection_index: detectionIndex,
+        }]
+      }))
+      if (!annotations.length) throw new Error('JSONL 中找不到有效的 xywh_top_left bbox')
+      const frameTimeline = validRows.map((row) => ({ frame_index: row.frame_index, video_pts_s: Number(row.video_pts_s) })).filter((item) => Number.isFinite(item.video_pts_s)).sort((a, b) => a.video_pts_s - b.video_pts_s)
+      commit((current) => ({
+        ...current,
+        annotations,
+        editor_state: { reid_edit_only: true, bbox_source_name: file.name, frame_timeline: frameTimeline },
+      }))
+      setSelectedId(null)
+      setCurrentFrame(validRows[0].frame_index)
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setImportingBboxes(false)
+    }
+  }
+
+  const handleAisJsonl = async (event) => {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file || !reidEditOnly) return
+    try {
+      const records = (await file.text()).split(/\r?\n/).filter((line) => line.trim()).flatMap((line, index) => {
+        let row
+        try { row = JSON.parse(line) } catch { throw new Error(`JSONL 第 ${index + 1} 行格式錯誤`) }
+        const pixel = row.pixel_xy
+        if (row.mmsi === undefined || row.mmsi === null || !Array.isArray(pixel) || pixel.length !== 2) return []
+        const x = Number(pixel[0]), y = Number(pixel[1])
+        if (!Number.isFinite(x) || !Number.isFinite(y)) return []
+        return [{ mmsi: String(row.mmsi), x, y }]
+      })
+      if (!records.length) throw new Error('JSONL 中找不到有效的 mmsi 與 pixel_xy')
+      const mmsiValues = [...new Set(records.map((item) => item.mmsi))].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
+      setAisRecords(records)
+      setSelectedMmsi(mmsiValues[0])
+      setAisSourceName(file.name)
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
   const toggleClassification = (labelId) => commit((current) => {
     const selected = current.classifications.some((item) => item.label_id === labelId)
     const classifications = project.classificationMode === 'single'
@@ -294,6 +407,12 @@ export default function Workspace({ project: initialProject, onExit }) {
   const classificationLabels = project.labels.filter((label) => !label.system)
   const activeLabel = project.labels.find((label) => label.id === activeLabelId)
   const visibleAnnotations = currentImage?.mediaType === 'video' ? annotationsAtFrame(document.annotations, currentFrame) : document.annotations
+  const reidEditOnly = editingProject && tool === 'reid'
+  const frameTimeline = reidEditOnly ? (document.editor_state?.frame_timeline || []) : []
+  const mmsiOptions = [...new Set(aisRecords.map((item) => item.mmsi))].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
+  const aisOverlayPoints = reidEditOnly && selectedMmsi && videoMetadata
+    ? aisRecords.filter((item) => item.mmsi === selectedMmsi).map((item) => ({ ...item, x: item.x * currentImage.width / videoMetadata.width, y: item.y * currentImage.height / videoMetadata.height }))
+    : []
 
   const addLabel = async () => {
     const name = newLabelName.trim()
@@ -409,10 +528,18 @@ export default function Workspace({ project: initialProject, onExit }) {
     setImages((items) => items.map((item) => item.id === currentImage.id ? { ...item, completed: next.completed } : item))
   }
 
+  const selectionEditor = selected && <section className="selection-editor"><div className="selection-title"><span className="panel-label">選取項目</span>{!reidEditOnly && <div><button className="icon-button" title={selected.hidden ? '顯示' : '隱藏'} onClick={() => updateSelected({ hidden: !selected.hidden })}>{selected.hidden ? <EyeOff size={15} /> : <Eye size={15} />}</button><button className="icon-button" title={selected.locked ? '解鎖' : '鎖定'} onClick={() => updateSelected({ locked: !selected.locked })}>{selected.locked ? <Lock size={15} /> : <Unlock size={15} />}</button><button className="icon-button danger" onClick={deleteSelected}><Trash2 size={15} /></button></div>}</div>
+    {selected.type !== 'ocr' && <label className="field small"><span>Label</span><select value={selected.labelId} onChange={(e) => updateSelected({ labelId: e.target.value })}>{project.labels.filter((label) => !label.system).map((label) => <option key={label.id} value={label.id}>{label.name}</option>)}</select></label>}
+    {selected.type === 'reid' && <><label className="field small"><span>Identity ID（跨圖片身分）</span><input value={selected.identity_id || ''} onChange={(e) => updateSelected({ identity_id: e.target.value })} placeholder="例如 person_001" /></label><label className="field small"><span>Track ID（同影片軌跡）</span><input value={selected.track_id || ''} onChange={(e) => updateSelected({ track_id: e.target.value })} /></label><label className="field small"><span>Camera ID</span><input value={selected.camera_id || ''} onChange={(e) => updateSelected({ camera_id: e.target.value })} /></label><label className="field small"><span>Video ID</span><input value={selected.video_id || ''} onChange={(e) => updateSelected({ video_id: e.target.value })} /></label>{currentImage?.mediaType === 'video' && <label className="field small"><span>Frame ID</span><input value={selected.frame_id ?? ''} readOnly /></label>}{currentImage?.mediaType === 'video' && !reidEditOnly && <label className="classification-toggle"><input type="checkbox" checked={Boolean(selected.keyframe)} onChange={(e) => updateSelected({ keyframe: e.target.checked })} /><span><strong>關鍵影格</strong><small>此框為追蹤軌跡的明確標註點</small></span></label>}</>}
+    {selectedLabel?.attributes.map((attribute) => <label className="field small" key={attribute.id}><span>{attribute.name}</span><input ref={selected.type === 'ocr' && attribute.id === 'transcription' ? ocrInputRef : null} type={attribute.type === 'number' ? 'number' : 'text'} value={selected.attributes?.[attribute.id] ?? ''} onChange={(e) => updateSelected({ attributes: { ...selected.attributes, [attribute.id]: attribute.type === 'number' ? (e.target.value === '' ? null : Number(e.target.value)) : e.target.value } })} placeholder={selected.type === 'ocr' ? '輸入框內文字' : ''} /></label>)}
+  </section>
+
   return (
     <main className="workspace-shell">
       <input ref={fileInputRef} className="hidden-file-input" type="file" multiple accept={project.primaryMode === 'reid' ? 'image/*,video/*' : 'image/*'} onChange={handleUpload} />
       <input ref={folderInputRef} className="hidden-file-input" type="file" multiple webkitdirectory="" directory="" onChange={handleUpload} />
+      <input ref={bboxInputRef} className="hidden-file-input" type="file" accept=".jsonl,application/json,text/plain" onChange={handleBboxJsonl} />
+      <input ref={aisInputRef} className="hidden-file-input" type="file" accept=".jsonl,application/json,text/plain" onChange={handleAisJsonl} />
       {/* 👇 新增：上傳進度遮罩 */}
       {uploading && (
         <div style={{ position: 'absolute', inset: 0, zIndex: 9999, backgroundColor: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -431,6 +558,8 @@ export default function Workspace({ project: initialProject, onExit }) {
           <button className="secondary-button compact" onClick={toggleCompleted} disabled={!currentImage}>{document.completed ? '取消完成' : '標記完成'}</button>
           <button className="secondary-button compact" onClick={() => fileInputRef.current?.click()} disabled={uploading}><ImagePlus size={16} />新增圖片</button>
           <button className="secondary-button compact" onClick={() => folderInputRef.current?.click()} disabled={uploading}><FolderOpen size={16} />選擇資料夾</button>
+          {editingProject && tool === 'reid' && currentImage?.mediaType === 'video' && <button className="secondary-button compact" onClick={() => bboxInputRef.current?.click()} disabled={importingBboxes || !videoMetadata}>{importingBboxes ? '開啟中…' : '開啟 bbox JSONL'}</button>}
+          {reidEditOnly && <button className="secondary-button compact" onClick={() => aisInputRef.current?.click()}>開啟 MMSI JSONL</button>}
           <div className="save-status"><span className={`status-dot ${saveState === '儲存失敗' ? 'failed' : ''}`} />{saveState}<button className="secondary-button compact" onClick={() => save()} disabled={!currentImage}><Save size={16} />手動儲存</button></div>
         </div>
       </header>
@@ -443,23 +572,19 @@ export default function Workspace({ project: initialProject, onExit }) {
           <button className="tool-button" onClick={() => setResetToken((value) => value + 1)}><RotateCcw size={19} /><span>重設視角 R</span></button>
         </aside>
         <section className="canvas-column">
-          <div className="mode-banner on">{tool === 'classification' ? '圖片分類模式 · 於右側選擇圖片層級 label · 右鍵拖曳視角' : '整合模式 · 左鍵標註／編輯 · 右鍵拖曳視角'}</div>
-          {!currentImage ? (progressFilter === 'all' ? <div className="upload-empty"><ImagePlus size={46} /><strong>載入圖片／影片資料集</strong><span>可選擇多個檔案或整個資料夾；檔案會複製至專案資料夾</span><div className="upload-actions"><button className="primary-button" onClick={() => fileInputRef.current?.click()} disabled={uploading}><ImagePlus size={16} />選擇檔案</button><button className="secondary-button" onClick={() => folderInputRef.current?.click()} disabled={uploading}><FolderOpen size={16} />選擇資料夾</button></div></div> : <div className="upload-empty"><strong>此分群沒有檔案</strong><span>{progressFilter === 'completed' ? '目前沒有已完成的資料' : '目前沒有未完成的資料'}</span></div>) : <AnnotationCanvas image={currentImage} imageUrl={api.imageUrl(project.id, currentImage.id)} annotations={visibleAnnotations} labels={project.labels} activeLabelId={tool === 'ocr' ? 'ocr-text' : activeLabelId} tool={tool} selectedId={selectedId} onSelect={setSelectedId} onCommit={handleCanvasCommit} onUpdate={(id, points) => commit((current) => { const annotations = current.annotations.map((item) => item.id === id ? { ...item, points, ...(item.type === 'reid' && item.generated === true ? { keyframe: true, generated: false } : {}) } : item); return { ...current, annotations: tool === 'reid' ? regenerateReidAnnotations(annotations) : annotations } })} resetToken={resetToken} currentFrame={currentFrame} onFrameChange={(frame) => { setCurrentFrame(frame); setSelectedId(null) }} />}
-          <footer className="image-nav"><button onClick={() => navigate(-1)} disabled={index === 0}><ChevronLeft size={18} />上一張</button><div className="progress-track"><span style={{ width: images.length ? `${((index + 1) / images.length) * 100}%` : '0%' }} /></div><button onClick={() => navigate(1)} disabled={index >= images.length - 1}>下一張<ChevronRight size={18} /></button><button className="secondary-button compact" onClick={() => fileInputRef.current?.click()} disabled={uploading}><ImagePlus size={16} />新增圖片</button><button className="secondary-button compact" onClick={() => folderInputRef.current?.click()} disabled={uploading}><FolderOpen size={16} />選擇資料夾</button></footer>
+          <div className="mode-banner on">{reidEditOnly ? `ReID 純修改模式 · bbox 已鎖定 · 可修改屬性與 ID${document.editor_state?.bbox_source_name ? ` · ${document.editor_state.bbox_source_name}` : ''}` : tool === 'classification' ? '圖片分類模式 · 於右側選擇圖片層級 label · 右鍵拖曳視角' : '整合模式 · 左鍵標註／編輯 · 右鍵拖曳視角'}</div>
+          {!currentImage ? (progressFilter === 'all' ? <div className="upload-empty"><ImagePlus size={46} /><strong>載入圖片／影片資料集</strong><span>可選擇多個檔案或整個資料夾；檔案會複製至專案資料夾</span><div className="upload-actions"><button className="primary-button" onClick={() => fileInputRef.current?.click()} disabled={uploading}><ImagePlus size={16} />選擇檔案</button><button className="secondary-button" onClick={() => folderInputRef.current?.click()} disabled={uploading}><FolderOpen size={16} />選擇資料夾</button></div></div> : <div className="upload-empty"><strong>此分群沒有檔案</strong><span>{progressFilter === 'completed' ? '目前沒有已完成的資料' : '目前沒有未完成的資料'}</span></div>) : <AnnotationCanvas image={currentImage} imageUrl={api.imageUrl(project.id, currentImage.id)} annotations={visibleAnnotations} labels={project.labels} activeLabelId={tool === 'ocr' ? 'ocr-text' : activeLabelId} tool={tool} selectedId={selectedId} onSelect={setSelectedId} onCommit={reidEditOnly ? () => {} : handleCanvasCommit} onUpdate={reidEditOnly ? () => {} : (id, points) => commit((current) => { const annotations = current.annotations.map((item) => item.id === id ? { ...item, points, ...(item.type === 'reid' && item.generated === true ? { keyframe: true, generated: false } : {}) } : item); return { ...current, annotations: tool === 'reid' ? regenerateReidAnnotations(annotations) : annotations } })} resetToken={resetToken} currentFrame={currentFrame} onFrameChange={(frame) => { setCurrentFrame(frame); setSelectedId(null) }} readOnlyGeometry={reidEditOnly} frameTimeline={frameTimeline} onVideoMetadata={setVideoMetadata} overlayPoints={aisOverlayPoints} />}
+          <footer className="image-nav"><button onClick={() => navigate(-1)} disabled={index === 0}><ChevronLeft size={18} />上一張</button><div className="progress-track"><span style={{ width: images.length ? `${((index + 1) / images.length) * 100}%` : '0%' }} /></div><button onClick={() => navigate(1)} disabled={index >= images.length - 1}>下一張<ChevronRight size={18} /></button></footer>
         </section>
         <aside className="inspector-panel">
+          {reidEditOnly && aisRecords.length > 0 && <section><span className="panel-label">MMSI 座標{aisSourceName ? ` · ${aisSourceName}` : ''}</span><label className="field small"><span>選擇 MMSI</span><select value={selectedMmsi} onChange={(event) => setSelectedMmsi(event.target.value)}>{mmsiOptions.map((mmsi) => <option key={mmsi} value={mmsi}>{mmsi}</option>)}</select></label></section>}
           {tool !== 'ocr' && <section><span className="panel-label">目前 LABEL</span><div className="label-picker">{project.labels.filter((label) => !label.system).map((label) => <div className="label-picker-row" key={label.id}>{editingLabelId === label.id ? <><input autoFocus value={editingLabelName} onChange={(event) => setEditingLabelName(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') renameLabel(); if (event.key === 'Escape') setEditingLabelId(null) }} /><button className="label-row-action confirm" title="儲存名稱" onClick={renameLabel} disabled={!editingLabelName.trim() || renamingLabel}><Check size={14} /></button><button className="label-row-action" title="取消" onClick={() => setEditingLabelId(null)}><X size={14} /></button></> : <><button className={`label-choice ${activeLabelId === label.id ? 'active' : ''}`} onClick={() => setActiveLabelId(label.id)}><i style={{ background: label.color }} />{label.name}</button><button className="label-row-action" title="修改名稱" onClick={() => { setEditingLabelId(label.id); setEditingLabelName(label.name) }}><Pencil size={14} /></button><button className="label-row-action danger" title="刪除未使用的 label" onClick={() => deleteLabel(label)} disabled={Boolean(deletingDefinition)}><Trash2 size={14} /></button></>}</div>)}</div><div className="label-add-row"><input value={newLabelName} onChange={(event) => setNewLabelName(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') addLabel() }} placeholder="輸入 label 名稱" /><button onClick={addLabel} disabled={!newLabelName.trim() || addingLabel}>{addingLabel ? '新增中…' : '新增'}</button></div></section>}
           {tool !== 'ocr' && tool !== 'classification' && activeLabel && <section><span className="panel-label">新增屬性 · {activeLabel.name}</span>{(activeLabel.attributes || []).length > 0 && <div className="attribute-summary">{activeLabel.attributes.map((attribute) => <span key={attribute.id}>{attribute.name}<small>{attribute.type === 'number' ? 'Number' : 'Text'}</small><button title="刪除未使用的屬性" onClick={() => deleteAttribute(attribute)} disabled={Boolean(deletingDefinition)}><X size={12} /></button></span>)}</div>}<div className="attribute-add-row"><input value={newAttributeName} onChange={(event) => setNewAttributeName(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') addAttribute() }} placeholder="屬性名稱" /><select value={newAttributeType} onChange={(event) => setNewAttributeType(event.target.value)}><option value="text">Text</option><option value="number">Number</option></select><button onClick={addAttribute} disabled={!newAttributeName.trim() || addingAttribute}>{addingAttribute ? '新增中…' : '新增'}</button></div></section>}
           {project.primaryMode === 'classification' && <section><span className="panel-label">圖片分類</span><div className="classification-list">{classificationLabels.map((label) => <label key={label.id}><input type={project.classificationMode === 'single' ? 'radio' : 'checkbox'} checked={document.classifications.some((item) => item.label_id === label.id)} onChange={() => toggleClassification(label.id)} /><i style={{ background: label.color }} />{label.name}</label>)}</div></section>}
           {project.primaryMode !== 'classification' && <section className="annotation-list-section"><span className="panel-label">目前畫面標註 · {visibleAnnotations.length}</span><div className="annotation-list">{visibleAnnotations.map((annotation, itemIndex) => {
             const label = project.labels.find((item) => item.id === annotation.labelId)
-            return <button key={annotation.id} className={selectedId === annotation.id ? 'active' : ''} onClick={() => setSelectedId(annotation.id)}><i style={{ background: label?.color }} /><span>{label?.name || '未命名'}<small>{TOOL_NAMES[annotation.type]} #{itemIndex + 1}</small></span>{annotation.hidden ? <EyeOff size={14} /> : <Eye size={14} />}</button>
+            return <div className="annotation-list-item" key={annotation.id}><button className={selectedId === annotation.id ? 'active' : ''} onClick={() => setSelectedId(annotation.id)}><i style={{ background: label?.color }} /><span>{label?.name || '未命名'}<small>{TOOL_NAMES[annotation.type]} #{itemIndex + 1}</small></span>{annotation.hidden ? <EyeOff size={14} /> : <Eye size={14} />}</button>{selectedId === annotation.id && selectionEditor}</div>
           })}</div></section>}
-          {selected && <section className="selection-editor"><div className="selection-title"><span className="panel-label">選取項目</span><div><button className="icon-button" title={selected.hidden ? '顯示' : '隱藏'} onClick={() => updateSelected({ hidden: !selected.hidden })}>{selected.hidden ? <EyeOff size={15} /> : <Eye size={15} />}</button><button className="icon-button" title={selected.locked ? '解鎖' : '鎖定'} onClick={() => updateSelected({ locked: !selected.locked })}>{selected.locked ? <Lock size={15} /> : <Unlock size={15} />}</button><button className="icon-button danger" onClick={deleteSelected}><Trash2 size={15} /></button></div></div>
-            {selected.type !== 'ocr' && <label className="field small"><span>Label</span><select value={selected.labelId} onChange={(e) => updateSelected({ labelId: e.target.value })}>{project.labels.filter((label) => !label.system).map((label) => <option key={label.id} value={label.id}>{label.name}</option>)}</select></label>}
-            {selected.type === 'reid' && <><label className="field small"><span>Identity ID（跨圖片身分）</span><input value={selected.identity_id || ''} onChange={(e) => updateSelected({ identity_id: e.target.value })} placeholder="例如 person_001" /></label><label className="field small"><span>Track ID（同影片軌跡）</span><input value={selected.track_id || ''} onChange={(e) => updateSelected({ track_id: e.target.value })} /></label><label className="field small"><span>Camera ID</span><input value={selected.camera_id || ''} onChange={(e) => updateSelected({ camera_id: e.target.value })} /></label>{currentImage?.mediaType === 'video' && <label className="classification-toggle"><input type="checkbox" checked={Boolean(selected.keyframe)} onChange={(e) => updateSelected({ keyframe: e.target.checked })} /><span><strong>關鍵影格</strong><small>此框為追蹤軌跡的明確標註點</small></span></label>}</>}
-            {selectedLabel?.attributes.map((attribute) => <label className="field small" key={attribute.id}><span>{attribute.name}</span><input ref={selected.type === 'ocr' && attribute.id === 'transcription' ? ocrInputRef : null} type={attribute.type === 'number' ? 'number' : 'text'} value={selected.attributes?.[attribute.id] ?? ''} onChange={(e) => updateSelected({ attributes: { ...selected.attributes, [attribute.id]: attribute.type === 'number' ? (e.target.value === '' ? null : Number(e.target.value)) : e.target.value } })} placeholder={selected.type === 'ocr' ? '輸入框內文字' : ''} /></label>)}
-          </section>}
           <section className="shortcut-card"><span className="panel-label">快捷鍵</span><div><kbd>F</kbd>儲存、標記完成並前往下一張</div><div><kbd>A</kbd><kbd>D</kbd>切換圖片</div><div><kbd>R</kbd>重設視角</div><div><kbd>Del</kbd>刪除選取</div><div><kbd>Ctrl Z/Y</kbd>復原／重做</div><div><kbd>Alt 點擊</kbd>循環選取</div><div><kbd>Shift 點擊</kbd>在重疊處強制標註</div></section>
         </aside>
       </div>

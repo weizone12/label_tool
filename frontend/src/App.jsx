@@ -21,7 +21,7 @@ export default function App() {
   return (
     <main className="home-shell">
       <header className="home-header">
-        <div><span className="eyebrow">LOCAL ANNOTATION WORKSPACE</span><h1>標註工作台</h1><p>管理資料集，建立精確且可追溯的標註。</p></div>
+        <div><span className="eyebrow">LOCAL ANNOTATION WORKSPACE</span><h1>MIKO 標註達人</h1><p>管理資料集，建立精確且可追溯的標註。</p></div>
         <button className="primary-button" onClick={() => setCreating(true)}><Plus size={18} />建立專案</button>
       </header>
       {error && <div className="error-banner">{error}</div>}
@@ -37,7 +37,7 @@ export default function App() {
               if (confirm(`確定刪除「${project.name}」及所有標註資料？`)) { await api.deleteProject(project.id); refresh() }
             }}><Trash2 size={16} /></button></div>
             <h2>{project.name}</h2>
-            <div className="mode-chips"><span>{modeName(project.primaryMode)}</span></div>
+            <div className="mode-chips"><span>{project.projectType === 'editing' ? '純修改專案' : '標註專案'}</span><span>{modeName(project.primaryMode)}</span></div>
             <small>更新於 {new Date(project.updatedAt).toLocaleString('zh-TW')}</small>
           </article>
         ))}

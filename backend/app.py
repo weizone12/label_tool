@@ -22,6 +22,7 @@ ALLOWED_IMAGES = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
 ALLOWED_VIDEOS = {".mp4", ".webm", ".mov", ".m4v", ".avi", ".mkv"}
 ALLOWED_MEDIA = ALLOWED_IMAGES | ALLOWED_VIDEOS
 SUPPORTED_MODES = {"rectangle", "polygon", "ocr", "rotated_rectangle", "semantic_segmentation", "instance_segmentation", "reid", "classification"}
+SUPPORTED_PROJECT_TYPES = {"annotation", "editing"}
 
 app = Flask(__name__)
 CORS(app, resources={r"/api/*": {"origins": ["http://127.0.0.1:5173", "http://localhost:5173"]}})
@@ -98,6 +99,12 @@ def write_text_atomic(path: Path, content: str) -> None:
 
 def normalize_project(config: dict, directory: Path) -> dict:
     changed = False
+    if config.get("projectType") not in SUPPORTED_PROJECT_TYPES:
+        config["projectType"] = "annotation"
+        changed = True
+    if config["projectType"] == "editing" and config.get("primaryMode") != "reid":
+        config["primaryMode"] = "reid"
+        changed = True
     if config.get("primaryMode") not in SUPPORTED_MODES:
         config["primaryMode"] = "rectangle"
         changed = True
@@ -504,7 +511,10 @@ def create_project():
     ensure_dirs()
     body = request.get_json(force=True)
     name = str(body.get("name", "")).strip()
-    primary_mode = body.get("primaryMode")
+    project_type = body.get("projectType", "annotation")
+    if project_type not in SUPPORTED_PROJECT_TYPES:
+        return jsonify({"error": "請選擇有效的專案類型"}), 400
+    primary_mode = "reid" if project_type == "editing" else body.get("primaryMode")
     if not name:
         return jsonify({"error": "專案名稱不可為空"}), 400
     if primary_mode not in SUPPORTED_MODES:
@@ -546,6 +556,7 @@ def create_project():
         "schema_version": "1.0",
         "id": project_id,
         "name": name,
+        "projectType": project_type,
         "primaryMode": primary_mode,
         "labels": labels,
         "classificationMode": classification_mode,
@@ -609,9 +620,14 @@ def update_project(project_id: str):
         conflict = validate_label_deletions(directory, existing.get("labels", []), body["labels"])
         if conflict:
             return jsonify({"error": conflict}), 400
-    for field in ("name", "primaryMode", "labels", "classificationMode", "mediaType"):
+    for field in ("name", "projectType", "primaryMode", "labels", "classificationMode", "mediaType"):
         if field in body:
             existing[field] = body[field]
+    if existing.get("projectType") not in SUPPORTED_PROJECT_TYPES:
+        return jsonify({"error": "請選擇有效的專案類型"}), 400
+    if existing["projectType"] == "editing":
+        existing["primaryMode"] = "reid"
+        existing["mediaType"] = "both"
     if existing.get("primaryMode") not in SUPPORTED_MODES:
         return jsonify({"error": "請選擇有效的標註方式"}), 400
     if existing.get("classificationMode") not in {"single", "multiple"}:
@@ -845,6 +861,8 @@ def get_annotation(project_id: str, image_id: str):
         "completed": bool(stored.get("completed", False)),
         "revision": int(stored.get("revision", 0)),
     }
+    if project["primaryMode"] == "reid" and isinstance(stored.get("editor_state"), dict):
+        payload["editor_state"] = stored["editor_state"]
     if stored.get("updatedAt"):
         payload["updatedAt"] = stored["updatedAt"]
     return jsonify(payload)
@@ -871,6 +889,8 @@ def save_annotation(project_id: str, image_id: str):
         "revision": int(body.get("revision", 0)) + 1,
         "updatedAt": utc_now(),
     }
+    if project["primaryMode"] == "reid" and isinstance(body.get("editor_state"), dict):
+        payload["editor_state"] = body["editor_state"]
     path = directory / "annotations" / f"{image_id}.json"
     write_json_atomic(path, payload)
     return jsonify(payload)
