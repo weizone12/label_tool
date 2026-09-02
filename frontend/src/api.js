@@ -49,7 +49,7 @@ const toStoredAnnotation = (annotation) => {
     geometry = { points: points.map(({ x, y }) => [x, y]) }
   }
   const metadata = { ...(annotation.metadata || {}) }
-  for (const key of ['hidden', 'locked', 'created_at', 'keyframe']) {
+  for (const key of ['hidden', 'locked', 'created_at', 'keyframe', 'generated']) {
     if (annotation[key] !== undefined) metadata[key] = annotation[key]
   }
   const stored = { id: annotation.id, mode: annotation.type, label_id: annotation.labelId, geometry, attributes: annotation.attributes || {}, metadata }

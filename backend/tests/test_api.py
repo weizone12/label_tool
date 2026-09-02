@@ -170,6 +170,53 @@ class ApiTestCase(unittest.TestCase):
                 self.assertEqual(response.status_code, 201)
                 self.assertEqual(response.get_json()["primaryMode"], mode)
 
+    def test_only_reid_accepts_video_input(self):
+        reid = self.client.post("/api/projects", json={"name": "reid video", "primaryMode": "reid", "labels": [{"id": "person", "name": "person", "color": "#ff0000"}]}).get_json()
+        self.assertEqual(reid["mediaType"], "both")
+        response = self.client.post(
+            f"/api/projects/{reid['id']}/images",
+            data={"files": (io.BytesIO(b"test-video"), "clip.mp4")},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.get_json()[0]["mediaType"], "video")
+
+        rectangle = self.client.post("/api/projects", json={"name": "rectangle image", "primaryMode": "rectangle", "labels": [{"id": "object", "name": "object", "color": "#00ff00"}]}).get_json()
+        response = self.client.post(
+            f"/api/projects/{rectangle['id']}/images",
+            data={"files": (io.BytesIO(b"test-video"), "clip.mp4")},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(response.get_json(), [])
+
+    def test_only_unused_labels_and_attributes_can_be_deleted(self):
+        used_label = {
+            "id": "used", "name": "Used", "color": "#ff0000",
+            "attributes": [{"id": "used-attribute", "name": "Used attribute", "type": "text"}, {"id": "unused-attribute", "name": "Unused attribute", "type": "text"}],
+        }
+        unused_label = {"id": "unused", "name": "Unused", "color": "#00ff00", "attributes": []}
+        project = self.client.post("/api/projects", json={"name": "deletion rules", "primaryMode": "rectangle", "labels": [used_label, unused_label]}).get_json()
+        source = Path(self.temp_dir.name) / "deletion.png"
+        Image.new("RGB", (32, 32), "white").save(source)
+        directory = self.app_module.project_dir(project["id"])
+        image = self.app_module.register_source_images(directory, [source])[0]
+        annotation = {
+            "id": str(uuid.uuid4()), "mode": "rectangle", "label_id": "used",
+            "geometry": {"x": 1, "y": 1, "width": 10, "height": 10},
+            "attributes": {"used-attribute": "value", "unused-attribute": ""}, "metadata": {},
+        }
+        self.client.put(f"/api/projects/{project['id']}/images/{image['id']}/annotation", json={"annotations": [annotation]})
+
+        retained = {**used_label, "attributes": [used_label["attributes"][0]]}
+        response = self.client.put(f"/api/projects/{project['id']}", json={"labels": [retained]})
+        self.assertEqual(response.status_code, 200)
+        response = self.client.put(f"/api/projects/{project['id']}", json={"labels": []})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("1 筆標註", response.get_json()["error"])
+        response = self.client.put(f"/api/projects/{project['id']}", json={"labels": [{**retained, "attributes": []}]})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("1 筆標註", response.get_json()["error"])
+
     def test_second_stage_segmentation_and_reid_exports(self):
         source_image = Path(self.temp_dir.name) / "second-stage.png"
         Image.new("RGB", (64, 48), "white").save(source_image)

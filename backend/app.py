@@ -105,6 +105,9 @@ def normalize_project(config: dict, directory: Path) -> dict:
         config["schema_version"] = "1.0"
         changed = True
     config.setdefault("classificationMode", "multiple")
+    if config["primaryMode"] == "reid" and config.get("mediaType") != "both":
+        config["mediaType"] = "both"
+        changed = True
     if config["primaryMode"] == "ocr" and not any(label.get("id") == "ocr-text" for label in config.get("labels", [])):
         config.setdefault("labels", []).insert(0, {
             "id": "ocr-text", "name": "文字", "color": "#22d3ee", "system": True,
@@ -153,6 +156,10 @@ def normalize_project(config: dict, directory: Path) -> dict:
 def load_project(project_id: str):
     directory = project_dir(project_id)
     return normalize_project(read_json(directory / "project.json"), directory)
+
+
+def project_allows_videos(project: dict) -> bool:
+    return project.get("primaryMode") == "reid"
 
 
 def image_record(path: Path, image_id: str | None = None) -> dict:
@@ -542,7 +549,7 @@ def create_project():
         "primaryMode": primary_mode,
         "labels": labels,
         "classificationMode": classification_mode,
-        "mediaType": body.get("mediaType", "image"),
+        "mediaType": "both" if primary_mode == "reid" else "image",
         "createdAt": now,
         "updatedAt": now,
         "imageCount": 0,
@@ -556,12 +563,52 @@ def get_project(project_id: str):
     return jsonify(load_project(project_id))
 
 
+def value_is_used(value) -> bool:
+    return value is not None and value != "" and value != [] and value != {}
+
+
+def validate_label_deletions(directory: Path, old_labels: list[dict], new_labels: list[dict]) -> str | None:
+    documents = [read_json(path, {}) for path in (directory / "annotations").glob("*.json")]
+    new_by_id = {str(label.get("id")): label for label in new_labels}
+    for label in old_labels:
+        label_id = str(label.get("id"))
+        if label_id not in new_by_id:
+            count = sum(
+                sum(1 for item in document.get("annotations", []) if item.get("label_id") == label_id)
+                + sum(1 for item in document.get("classifications", []) if item.get("label_id") == label_id)
+                for document in documents
+            )
+            if count:
+                return f"Label「{label.get('name', label_id)}」仍被 {count} 筆標註使用，無法刪除"
+            continue
+        new_attribute_ids = {str(attribute.get("id")) for attribute in new_by_id[label_id].get("attributes", [])}
+        for attribute in label.get("attributes", []):
+            attribute_id = str(attribute.get("id"))
+            if attribute_id in new_attribute_ids:
+                continue
+            count = sum(
+                1
+                for document in documents
+                for item in document.get("annotations", [])
+                if item.get("label_id") == label_id and value_is_used(item.get("attributes", {}).get(attribute_id))
+            )
+            if count:
+                return f"屬性「{attribute.get('name', attribute_id)}」仍被 {count} 筆標註使用，無法刪除"
+    return None
+
+
 @app.put("/api/projects/<project_id>")
 def update_project(project_id: str):
     directory = project_dir(project_id)
     existing = read_json(directory / "project.json", {})
     body = request.get_json(force=True)
     old_name = existing.get("name")
+    if "labels" in body:
+        if not isinstance(body["labels"], list):
+            return jsonify({"error": "labels 必須是陣列"}), 400
+        conflict = validate_label_deletions(directory, existing.get("labels", []), body["labels"])
+        if conflict:
+            return jsonify({"error": conflict}), 400
     for field in ("name", "primaryMode", "labels", "classificationMode", "mediaType"):
         if field in body:
             existing[field] = body[field]
@@ -589,7 +636,7 @@ def list_images(project_id: str):
 def select_image_files(project_id: str):
     try:
         project = load_project(project_id)
-        paths = run_windows_picker("files", project.get("mediaType") in {"video", "both"})
+        paths = run_windows_picker("files", project_allows_videos(project))
         return jsonify({"paths": [str(path.resolve()) for path in paths], "root": None})
     except (RuntimeError, json.JSONDecodeError) as error:
         return jsonify({"error": str(error)}), 500
@@ -603,7 +650,7 @@ def select_image_folder(project_id: str):
             return jsonify({"paths": [], "root": None})
         root = selected[0].resolve()
         project = load_project(project_id)
-        allowed = ALLOWED_MEDIA if project.get("mediaType") in {"video", "both"} else ALLOWED_IMAGES
+        allowed = ALLOWED_MEDIA if project_allows_videos(project) else ALLOWED_IMAGES
         paths = [path for path in root.rglob("*") if path.is_file() and path.suffix.lower() in allowed]
         return jsonify({"paths": [str(path.resolve()) for path in paths], "root": str(root)})
     except (RuntimeError, json.JSONDecodeError, OSError) as error:
@@ -618,7 +665,7 @@ def register_image_paths(project_id: str):
     if not isinstance(raw_paths, list):
         return jsonify({"error": "paths 必須是陣列"}), 400
     project = load_project(project_id)
-    allowed = ALLOWED_MEDIA if project.get("mediaType") in {"video", "both"} else ALLOWED_IMAGES
+    allowed = ALLOWED_MEDIA if project_allows_videos(project) else ALLOWED_IMAGES
     paths = [Path(value).resolve() for value in raw_paths if isinstance(value, str)]
     paths = [path for path in paths if path.is_file() and path.suffix.lower() in allowed]
     root_value = body.get("root")
@@ -633,7 +680,7 @@ def upload_images(project_id: str):
     uploaded = []
     metadata = image_metadata(directory)
     project = load_project(project_id)
-    allowed = ALLOWED_MEDIA if project.get("mediaType") in {"video", "both"} else ALLOWED_IMAGES
+    allowed = ALLOWED_MEDIA if project_allows_videos(project) else ALLOWED_IMAGES
 
     for file in request.files.getlist("files"):
         raw_filename = str(file.filename or "").replace("\\", "/")

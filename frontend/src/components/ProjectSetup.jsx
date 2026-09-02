@@ -17,7 +17,6 @@ export default function ProjectSetup({ onCancel, onCreated }) {
   const [primaryMode, setPrimaryMode] = useState('rectangle')
   const [labels, setLabels] = useState([blankLabel()])
   const [classificationMode, setClassificationMode] = useState('multiple')
-  const [mediaType, setMediaType] = useState('image')
   const [error, setError] = useState('')
   const labelsRequired = primaryMode !== 'ocr'
   const valid = useMemo(() => name.trim() && primaryMode && (!labelsRequired || labels.some((label) => label.name.trim())), [name, primaryMode, labelsRequired, labels])
@@ -39,7 +38,7 @@ export default function ProjectSetup({ onCancel, onCreated }) {
         id: 'ocr-text', name: '文字', color: '#22d3ee', system: true,
         attributes: [{ id: 'transcription', name: '辨識文字', type: 'text', system: true }],
       }, ...cleanLabels]
-      onCreated(await api.createProject({ name: name.trim(), primaryMode, labels: cleanLabels, ...(primaryMode === 'classification' ? { classificationMode } : {}), mediaType: primaryMode === 'reid' ? mediaType : 'image' }))
+      onCreated(await api.createProject({ name: name.trim(), primaryMode, labels: cleanLabels, ...(primaryMode === 'classification' ? { classificationMode } : {}), mediaType: primaryMode === 'reid' ? 'both' : 'image' }))
     } catch (err) { setError(err.message) }
   }
 
@@ -55,7 +54,7 @@ export default function ProjectSetup({ onCancel, onCreated }) {
           return <button key={mode} className={`option-card ${selected ? 'selected' : ''}`} onClick={() => setPrimaryMode(mode)}>{selected && <Check size={17} />}{modeName(mode)}</button>
         })}</div></div>
         {primaryMode === 'classification' && <label className="field"><span>圖片分類模式</span><select value={classificationMode} onChange={(e) => setClassificationMode(e.target.value)}><option value="single">單一分類</option><option value="multiple">多標籤分類</option></select></label>}
-        {primaryMode === 'reid' && <label className="field"><span>ReID 資料來源</span><select value={mediaType} onChange={(e) => setMediaType(e.target.value)}><option value="image">圖片</option><option value="video">影片</option><option value="both">圖片與影片</option></select></label>}
+        {primaryMode === 'reid' && <div className="field"><span>ReID 資料來源</span><small>可載入圖片或影片。</small></div>}
       </section>
       {labelsRequired && <section className="setup-section">
         <div className="section-title"><div><span className="step-mark">02</span><h2>Labels</h2></div><button className="secondary-button" onClick={() => setLabels([...labels, blankLabel(labels.length)])}><Plus size={16} />新增 label</button></div>
