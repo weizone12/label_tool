@@ -608,6 +608,35 @@ def validate_label_deletions(directory: Path, old_labels: list[dict], new_labels
     return None
 
 
+def remove_deleted_empty_attributes(directory: Path, old_labels: list[dict], new_labels: list[dict]) -> None:
+    new_by_id = {str(label.get("id")): label for label in new_labels}
+    removed_by_label = {}
+    for label in old_labels:
+        label_id = str(label.get("id"))
+        if label_id not in new_by_id:
+            continue
+        retained_ids = {str(attribute.get("id")) for attribute in new_by_id[label_id].get("attributes", [])}
+        removed_ids = {str(attribute.get("id")) for attribute in label.get("attributes", []) if str(attribute.get("id")) not in retained_ids}
+        if removed_ids:
+            removed_by_label[label_id] = removed_ids
+    if not removed_by_label:
+        return
+    for path in (directory / "annotations").glob("*.json"):
+        document = read_json(path, {})
+        changed = False
+        for annotation in document.get("annotations", []):
+            removed_ids = removed_by_label.get(str(annotation.get("label_id")), set())
+            attributes = annotation.get("attributes")
+            if not isinstance(attributes, dict):
+                continue
+            for attribute_id in removed_ids:
+                if attribute_id in attributes and not value_is_used(attributes[attribute_id]):
+                    del attributes[attribute_id]
+                    changed = True
+        if changed:
+            write_json_atomic(path, document)
+
+
 @app.put("/api/projects/<project_id>")
 def update_project(project_id: str):
     directory = project_dir(project_id)
@@ -620,6 +649,7 @@ def update_project(project_id: str):
         conflict = validate_label_deletions(directory, existing.get("labels", []), body["labels"])
         if conflict:
             return jsonify({"error": conflict}), 400
+        remove_deleted_empty_attributes(directory, existing.get("labels", []), body["labels"])
     for field in ("name", "projectType", "primaryMode", "labels", "classificationMode", "mediaType"):
         if field in body:
             existing[field] = body[field]

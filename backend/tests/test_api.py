@@ -237,6 +237,8 @@ class ApiTestCase(unittest.TestCase):
         retained = {**used_label, "attributes": [used_label["attributes"][0]]}
         response = self.client.put(f"/api/projects/{project['id']}", json={"labels": [retained]})
         self.assertEqual(response.status_code, 200)
+        saved_annotation = self.client.get(f"/api/projects/{project['id']}/images/{image['id']}/annotation").get_json()["annotations"][0]
+        self.assertEqual(saved_annotation["attributes"], {"used-attribute": "value"})
         response = self.client.put(f"/api/projects/{project['id']}", json={"labels": []})
         self.assertEqual(response.status_code, 400)
         self.assertIn("1 筆標註", response.get_json()["error"])
