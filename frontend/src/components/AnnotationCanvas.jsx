@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { createId } from '../uuid'
 
 const distanceToSegment = (p, a, b) => {
   const dx = b.x - a.x, dy = b.y - a.y
@@ -79,7 +80,7 @@ export default function AnnotationCanvas({ image, imageUrl, annotations, labels,
 
   const finish = useCallback((points, type = tool) => {
     if (!activeLabelId || !points.length) return
-    onCommit({ id: crypto.randomUUID(), type, labelId: activeLabelId, points, attributes: {}, locked: false, hidden: false, created_at: new Date().toISOString() })
+    onCommit({ id: createId(), type, labelId: activeLabelId, points, attributes: {}, locked: false, hidden: false, created_at: new Date().toISOString() })
     setDraft([])
   }, [activeLabelId, onCommit, tool])
 

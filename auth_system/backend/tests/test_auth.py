@@ -44,6 +44,9 @@ class AuthTestCase(unittest.TestCase):
     def test_complete_user_lifecycle_and_permissions(self):
         response, admin_csrf = self.login("admin", "AdminPassword!123")
         self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.client.get("/api/auth/verify").status_code, 200)
+        self.assertEqual(self.client.post("/api/auth/verify").status_code, 403)
+        self.assertEqual(self.post("/api/auth/verify", token=admin_csrf).status_code, 200)
 
         response = self.post("/api/admin/users", {"username": "new-user", "display_name": "New User"}, admin_csrf)
         self.assertEqual(response.status_code, 201)

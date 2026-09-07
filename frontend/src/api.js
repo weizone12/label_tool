@@ -1,5 +1,15 @@
 async function request(path, options = {}) {
-  const response = await fetch(path, options)
+  let csrfToken = ''
+  if (options.method && ['POST', 'PUT', 'PATCH', 'DELETE'].includes(options.method)) {
+    const csrfResponse = await fetch('/api/auth/csrf', { credentials: 'same-origin' })
+    if (!csrfResponse.ok) throw new Error('無法取得 CSRF 權杖')
+    csrfToken = (await csrfResponse.json()).csrf_token
+  }
+  const response = await fetch(path, {
+    credentials: 'same-origin',
+    ...options,
+    headers: { ...(options.headers || {}), ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}) },
+  })
   if (!response.ok) {
     let message = `請求失敗（${response.status}）`
     try { message = (await response.json()).error || message } catch { /* noop */ }
@@ -69,6 +79,11 @@ const toEditorDocument = (document) => ({ ...document, annotations: (document.an
 const toStoredDocument = (document) => ({ ...document, annotations: (document.annotations || []).map(toStoredAnnotation) })
 
 export const api = {
+  listManagedUsers: async () => (await request('/api/admin/users')).users,
+  getAssignments: async (id) => (await request(`/api/projects/${id}/assignments`)).user_ids,
+  updateAssignments: async (id, userIds) => (await request(`/api/projects/${id}/assignments`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ user_ids: userIds }),
+  })).user_ids,
   listProjects: () => request('/api/projects'),
   createProject: (data) => request('/api/projects', {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data),
@@ -77,6 +92,25 @@ export const api = {
     method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data),
   }),
   deleteProject: (id) => request(`/api/projects/${id}`, { method: 'DELETE' }),
+  downloadProject: async (id) => {
+    const response = await fetch(`/api/projects/${id}/download`, { credentials: 'same-origin' })
+    if (!response.ok) {
+      let message = `下載失敗（${response.status}）`
+      try { message = (await response.json()).error || message } catch { /* noop */ }
+      throw new Error(message)
+    }
+    const disposition = response.headers.get('Content-Disposition') || ''
+    const matchedName = disposition.match(/filename\*?=(?:UTF-8''|\")?([^";]+)/i)?.[1]
+    const filename = matchedName ? decodeURIComponent(matchedName.replace(/^"|"$/g, '')) : 'project.zip'
+    const url = URL.createObjectURL(await response.blob())
+    const link = document.createElement('a')
+    link.href = url
+    link.download = filename
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    URL.revokeObjectURL(url)
+  },
   listImages: (id) => request(`/api/projects/${id}/images`),
   selectImageFiles: (id) => request(`/api/projects/${id}/images/select-files`, { method: 'POST' }),
   selectImageFolder: (id) => request(`/api/projects/${id}/images/select-folder`, { method: 'POST' }),

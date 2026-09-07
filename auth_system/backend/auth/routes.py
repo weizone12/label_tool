@@ -115,6 +115,18 @@ def me(user):
     return jsonify({"user": user.public_dict()})
 
 
+@auth_blueprint.route("/api/auth/verify", methods=["GET", "POST"])
+@require_user
+def verify_session(user):
+    """Validate a session for a trusted sibling backend.
+
+    POST requests also pass through this blueprint's CSRF guard, allowing the
+    annotation backend to protect state-changing API calls without sharing the
+    auth database or server-side session storage.
+    """
+    return jsonify({"user": user.public_dict()})
+
+
 @auth_blueprint.post("/api/auth/change-password")
 @require_user
 def update_own_password(user):

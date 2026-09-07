@@ -5,14 +5,18 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import uuid
 import base64
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-from flask import Flask, abort, jsonify, request, send_file
+from flask import Flask, abort, g, jsonify, request, send_file
 from flask_cors import CORS
 from PIL import Image
+from auth_integration import register_auth_integration
+from project_access import assigned_project_ids, register_project_access, remove_project_assignments
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -25,7 +29,9 @@ SUPPORTED_MODES = {"rectangle", "polygon", "ocr", "rotated_rectangle", "semantic
 SUPPORTED_PROJECT_TYPES = {"annotation", "editing"}
 
 app = Flask(__name__)
-CORS(app, resources={r"/api/*": {"origins": ["http://127.0.0.1:5173", "http://localhost:5173"]}})
+CORS(app, resources={r"/api/*": {"origins": os.environ.get("LABEL_TOOL_CORS_ORIGINS", "http://127.0.0.1:5173,http://localhost:5173").split(",")}})
+register_auth_integration(app)
+register_project_access(app)
 
 
 def utc_now() -> str:
@@ -112,8 +118,9 @@ def normalize_project(config: dict, directory: Path) -> dict:
         config["schema_version"] = "1.0"
         changed = True
     config.setdefault("classificationMode", "multiple")
-    if config["primaryMode"] == "reid" and config.get("mediaType") != "both":
-        config["mediaType"] = "both"
+    expected_media_type = "video" if config["projectType"] == "editing" else ("both" if config["primaryMode"] == "reid" else "image")
+    if config.get("mediaType") != expected_media_type:
+        config["mediaType"] = expected_media_type
         changed = True
     if config["primaryMode"] == "ocr" and not any(label.get("id") == "ocr-text" for label in config.get("labels", [])):
         config.setdefault("labels", []).insert(0, {
@@ -167,6 +174,12 @@ def load_project(project_id: str):
 
 def project_allows_videos(project: dict) -> bool:
     return project.get("primaryMode") == "reid"
+
+
+def project_allowed_media(project: dict) -> set[str]:
+    if project.get("projectType") == "editing":
+        return ALLOWED_VIDEOS
+    return ALLOWED_MEDIA if project_allows_videos(project) else ALLOWED_IMAGES
 
 
 def image_record(path: Path, image_id: str | None = None) -> dict:
@@ -319,7 +332,7 @@ def list_image_records(directory: Path) -> list[dict]:
     return records
 
 
-def run_windows_picker(kind: str, include_videos: bool = False) -> list[Path]:
+def run_windows_picker(kind: str, include_videos: bool = False, videos_only: bool = False) -> list[Path]:
     if os.name != "nt":
         raise RuntimeError("Windows 原生選擇視窗僅支援 Windows")
     common = """
@@ -341,7 +354,7 @@ $owner.Activate()
 [System.Windows.Forms.Application]::DoEvents()
 """
     if kind == "files":
-        media_filter = "Image and video files|*.jpg;*.jpeg;*.png;*.webp;*.bmp;*.tif;*.tiff;*.mp4;*.webm;*.mov;*.m4v;*.avi;*.mkv" if include_videos else "Image files|*.jpg;*.jpeg;*.png;*.webp;*.bmp;*.tif;*.tiff"
+        media_filter = "Video files|*.mp4;*.webm;*.mov;*.m4v;*.avi;*.mkv" if videos_only else ("Image and video files|*.jpg;*.jpeg;*.png;*.webp;*.bmp;*.tif;*.tiff;*.mp4;*.webm;*.mov;*.m4v;*.avi;*.mkv" if include_videos else "Image files|*.jpg;*.jpeg;*.png;*.webp;*.bmp;*.tif;*.tiff")
         picker = """
 $dialog = New-Object System.Windows.Forms.OpenFileDialog
 $dialog.Multiselect = $true
@@ -502,6 +515,9 @@ def list_projects():
         config = read_json(config_path, {})
         if config:
             projects.append(normalize_project(config, config_path.parent))
+    if not app.config.get("AUTH_DISABLED_FOR_TESTS") and not g.current_user.get("is_admin"):
+        allowed = assigned_project_ids(g.current_user["id"])
+        projects = [project for project in projects if project.get("id") in allowed]
     projects.sort(key=lambda item: item.get("updatedAt", ""), reverse=True)
     return jsonify(projects)
 
@@ -560,7 +576,7 @@ def create_project():
         "primaryMode": primary_mode,
         "labels": labels,
         "classificationMode": classification_mode,
-        "mediaType": "both" if primary_mode == "reid" else "image",
+        "mediaType": "video" if project_type == "editing" else ("both" if primary_mode == "reid" else "image"),
         "createdAt": now,
         "updatedAt": now,
         "imageCount": 0,
@@ -652,7 +668,7 @@ def list_images(project_id: str):
 def select_image_files(project_id: str):
     try:
         project = load_project(project_id)
-        paths = run_windows_picker("files", project_allows_videos(project))
+        paths = run_windows_picker("files", project_allows_videos(project), project.get("projectType") == "editing")
         return jsonify({"paths": [str(path.resolve()) for path in paths], "root": None})
     except (RuntimeError, json.JSONDecodeError) as error:
         return jsonify({"error": str(error)}), 500
@@ -666,7 +682,7 @@ def select_image_folder(project_id: str):
             return jsonify({"paths": [], "root": None})
         root = selected[0].resolve()
         project = load_project(project_id)
-        allowed = ALLOWED_MEDIA if project_allows_videos(project) else ALLOWED_IMAGES
+        allowed = project_allowed_media(project)
         paths = [path for path in root.rglob("*") if path.is_file() and path.suffix.lower() in allowed]
         return jsonify({"paths": [str(path.resolve()) for path in paths], "root": str(root)})
     except (RuntimeError, json.JSONDecodeError, OSError) as error:
@@ -681,7 +697,7 @@ def register_image_paths(project_id: str):
     if not isinstance(raw_paths, list):
         return jsonify({"error": "paths 必須是陣列"}), 400
     project = load_project(project_id)
-    allowed = ALLOWED_MEDIA if project_allows_videos(project) else ALLOWED_IMAGES
+    allowed = project_allowed_media(project)
     paths = [Path(value).resolve() for value in raw_paths if isinstance(value, str)]
     paths = [path for path in paths if path.is_file() and path.suffix.lower() in allowed]
     root_value = body.get("root")
@@ -696,7 +712,7 @@ def upload_images(project_id: str):
     uploaded = []
     metadata = image_metadata(directory)
     project = load_project(project_id)
-    allowed = ALLOWED_MEDIA if project_allows_videos(project) else ALLOWED_IMAGES
+    allowed = project_allowed_media(project)
 
     for file in request.files.getlist("files"):
         raw_filename = str(file.filename or "").replace("\\", "/")
@@ -873,6 +889,8 @@ def save_annotation(project_id: str, image_id: str):
     resolve_image(project_id, image_id)
     directory = project_dir(project_id)
     project = load_project(project_id)
+    path = directory / "annotations" / f"{image_id}.json"
+    stored = read_json(path, {})
     body = request.get_json(force=True)
     is_classification = project["primaryMode"] == "classification"
     valid_ids = {label["id"] for label in project.get("labels", [])}
@@ -889,24 +907,114 @@ def save_annotation(project_id: str, image_id: str):
         "revision": int(body.get("revision", 0)) + 1,
         "updatedAt": utc_now(),
     }
-    if project["primaryMode"] == "reid" and isinstance(body.get("editor_state"), dict):
-        payload["editor_state"] = body["editor_state"]
-    path = directory / "annotations" / f"{image_id}.json"
+    if project["primaryMode"] == "reid":
+        requested_editor_state = body.get("editor_state")
+        can_manage_sources = app.config.get("AUTH_DISABLED_FOR_TESTS") is True or bool(getattr(g, "current_user", {}).get("is_admin"))
+        if can_manage_sources and isinstance(requested_editor_state, dict):
+            payload["editor_state"] = requested_editor_state
+        elif isinstance(stored.get("editor_state"), dict):
+            payload["editor_state"] = stored["editor_state"]
     write_json_atomic(path, payload)
     return jsonify(payload)
+
+
+@app.get("/api/projects/<project_id>/download")
+def download_project(project_id: str):
+    directory = project_dir(project_id)
+    project = load_project(project_id)
+    archive = tempfile.NamedTemporaryFile(prefix="label-tool-", suffix=".zip", delete=False)
+    archive_path = Path(archive.name)
+    archive.close()
+
+    try:
+        with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=True) as bundle:
+            attribute_names_by_label = {
+                str(label.get("id")): {
+                    str(attribute.get("id")): str(attribute.get("name") or attribute.get("id"))
+                    for attribute in label.get("attributes", [])
+                }
+                for label in project.get("labels", [])
+            }
+            dataset = {
+                "schema_version": "1.0",
+                "project_name": project.get("name", ""),
+                "task": project.get("primaryMode", ""),
+                "labels": [{
+                    "id": label.get("id"),
+                    "name": label.get("name"),
+                    "attributes": [{"name": item.get("name"), "type": item.get("type")} for item in label.get("attributes", [])],
+                } for label in project.get("labels", [])],
+            }
+            if project.get("primaryMode") == "classification":
+                dataset["classification_mode"] = project.get("classificationMode", "multiple")
+            dataset["samples"] = []
+
+            for record in list_image_records(directory):
+                source = Path(record["sourcePath"])
+                media_path = Path(project_media_path(record, record["filename"]))
+                bundle.write(source, media_path.as_posix())
+
+                annotation_path = directory / "annotations" / f"{record['id']}.json"
+                annotation = read_json(annotation_path, {})
+                if annotation_path.is_file() and annotation.get("completed") is True:
+                    training_annotations = []
+                    for annotation_index, item in enumerate(annotation.get("annotations", []), start=1):
+                        cleaned = {
+                            key: item[key] for key in ("mode", "label_id", "geometry") if key in item
+                        }
+                        attribute_names = attribute_names_by_label.get(str(item.get("label_id")), {})
+                        cleaned["attributes"] = {
+                            attribute_names.get(str(attribute_id), str(attribute_id)): value
+                            for attribute_id, value in item.get("attributes", {}).items()
+                        }
+                        cleaned["id"] = annotation_index
+                        geometry = item.get("geometry", {})
+                        if item.get("mode") in {"rectangle", "reid"} and all(key in geometry for key in ("x", "y", "width", "height")):
+                            cleaned["bbox"] = [geometry["x"], geometry["y"], geometry["width"], geometry["height"]]
+                            cleaned.pop("geometry", None)
+                        if item.get("mode") == "reid":
+                            cleaned.update({
+                                key: item.get(key) for key in ("identity_id", "track_id", "camera_id", "video_id", "frame_id")
+                            })
+                        training_annotations.append(cleaned)
+                    training_data = {
+                        "schema_version": "1.0",
+                        "media": {
+                            "file_name": media_path.as_posix(),
+                            "type": record.get("mediaType", "image"),
+                            "width": int(record.get("width", 0)),
+                            "height": int(record.get("height", 0)),
+                        },
+                        "annotations": training_annotations,
+                        "classifications": annotation.get("classifications", []),
+                    }
+                    annotation_archive_path = (Path("annotations") / Path(f"{media_path.as_posix()}.json")).as_posix()
+                    bundle.writestr(annotation_archive_path, json.dumps(training_data, ensure_ascii=False, indent=2))
+                    dataset["samples"].append(training_data)
+
+            bundle.writestr("dataset.json", json.dumps(dataset, ensure_ascii=False, indent=2))
+
+        download_name = f"{safe_media_relative_path(project.get('name') or project_id).name}.zip"
+        response = send_file(archive_path, as_attachment=True, download_name=download_name, mimetype="application/zip")
+        response.call_on_close(lambda: archive_path.unlink(missing_ok=True))
+        return response
+    except Exception:
+        archive_path.unlink(missing_ok=True)
+        raise
 
 
 @app.delete("/api/projects/<project_id>")
 def delete_project(project_id: str):
     directory = project_dir(project_id)
     shutil.rmtree(directory)
+    remove_project_assignments(project_id)
     return "", 204
 
 
 if __name__ == "__main__":
     ensure_dirs()
     app.run(
-        host="127.0.0.1",
-        port=5001,
+        host=os.environ.get("LABEL_TOOL_HOST", "127.0.0.1"),
+        port=int(os.environ.get("LABEL_TOOL_PORT", "5001")),
         debug=os.environ.get("LABEL_TOOL_DEBUG") == "1",
     )

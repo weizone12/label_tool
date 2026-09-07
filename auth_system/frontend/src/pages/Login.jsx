@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { authApi } from '../api'
-import { go } from '../AuthApp'
+import { finishAuthentication, go } from '../AuthApp'
 
 export default function Login() {
   const [username, setUsername] = useState('')
@@ -11,7 +11,8 @@ export default function Login() {
     setError('')
     try {
       const { user } = await authApi.login(username, password)
-      go(user.must_change_password ? '/change-password' : '/auth-home')
+      if (user.must_change_password) go('/change-password')
+      else finishAuthentication()
     } catch (err) { setError(err.message) }
   }
   return <main className="auth-shell"><form className="auth-card" onSubmit={submit}>

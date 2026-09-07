@@ -31,7 +31,7 @@ def create_app() -> Flask:
         SESSION_PERMANENT=False,
     )
     Session(app)
-    CORS(app, resources={r"/api/*": {"origins": ["http://127.0.0.1:5174", "http://localhost:5174"]}}, supports_credentials=True)
+    CORS(app, resources={r"/api/*": {"origins": os.environ.get("AUTH_CORS_ORIGINS", "http://127.0.0.1:5174,http://localhost:5174").split(",")}}, supports_credentials=True)
     database_url = os.environ.get("AUTH_DATABASE_URL", f"sqlite:///{(DATA_DIR / 'users.db').as_posix()}")
     init_database(database_url)
     bootstrap_admin()
@@ -49,4 +49,4 @@ app = create_app()
 
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=5002, debug=os.environ.get("AUTH_DEBUG") == "1")
+    app.run(host=os.environ.get("AUTH_HOST", "127.0.0.1"), port=int(os.environ.get("AUTH_PORT", "5002")), debug=os.environ.get("AUTH_DEBUG") == "1")

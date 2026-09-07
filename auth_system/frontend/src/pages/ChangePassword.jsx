@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { authApi } from '../api'
-import { go } from '../AuthApp'
+import { finishAuthentication } from '../AuthApp'
 
 export default function ChangePassword() {
   const [current, setCurrent] = useState('')
@@ -8,7 +8,7 @@ export default function ChangePassword() {
   const [error, setError] = useState('')
   const submit = async (event) => {
     event.preventDefault()
-    try { await authApi.changePassword(current, next); go('/auth-home') }
+    try { await authApi.changePassword(current, next); finishAuthentication() }
     catch (err) { setError(err.message) }
   }
   return <main className="auth-shell"><form className="auth-card" onSubmit={submit}>

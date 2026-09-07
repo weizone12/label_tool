@@ -1,6 +1,7 @@
 $ErrorActionPreference = 'Stop'
 
 $labelToolRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+$networkConfig = Get-Content -LiteralPath (Join-Path $labelToolRoot 'network-config.json') -Raw | ConvertFrom-Json
 $backendPath = Join-Path $labelToolRoot 'backend'
 $frontendPath = Join-Path $labelToolRoot 'frontend'
 $runtimePath = Join-Path $labelToolRoot '.runtime'
@@ -26,10 +27,24 @@ function Test-HttpUrl([string]$Url) {
     }
 }
 
-$backendPid = Get-ListeningPid 5001
-$frontendPid = Get-ListeningPid 5173
-if ($backendPid -and -not (Test-HttpUrl 'http://127.0.0.1:5001/api/health')) { throw 'Port 5001 is occupied by an unexpected service.' }
-if ($frontendPid -and -not (Test-HttpUrl 'http://127.0.0.1:5173/')) { throw 'Port 5173 is occupied by an unexpected service.' }
+$backendPid = Get-ListeningPid $networkConfig.labelBackendPort
+$frontendPid = Get-ListeningPid $networkConfig.labelFrontendPort
+$localAuthUrl = "$($networkConfig.scheme)://$($networkConfig.backendBindHost):$($networkConfig.authBackendPort)"
+$localBackendUrl = "$($networkConfig.scheme)://$($networkConfig.backendBindHost):$($networkConfig.labelBackendPort)"
+$localFrontendUrl = "$($networkConfig.scheme)://127.0.0.1:$($networkConfig.labelFrontendPort)"
+$publicFrontendUrl = "$($networkConfig.scheme)://$($networkConfig.publicHost):$($networkConfig.labelFrontendPort)"
+$env:LABEL_TOOL_HOST = $networkConfig.backendBindHost
+$env:LABEL_TOOL_PORT = [string]$networkConfig.labelBackendPort
+$env:LABEL_TOOL_AUTH_SERVICE_URL = $localAuthUrl
+$env:LABEL_TOOL_CORS_ORIGINS = "$publicFrontendUrl,$($networkConfig.scheme)://localhost:$($networkConfig.labelFrontendPort)"
+try {
+    $authHealth = Invoke-RestMethod -Uri "$localAuthUrl/api/health" -TimeoutSec 3
+    if ($authHealth.service -ne 'auth') { throw 'unexpected service' }
+} catch {
+    throw 'Auth system is not running. Start auth_system\start-auth.ps1 first.'
+}
+if ($backendPid -and -not (Test-HttpUrl "$localBackendUrl/api/health")) { throw "Port $($networkConfig.labelBackendPort) is occupied by an unexpected service." }
+if ($frontendPid -and -not (Test-HttpUrl "$localFrontendUrl/")) { throw "Port $($networkConfig.labelFrontendPort) is occupied by an unexpected service." }
 
 if (Test-Path -LiteralPath $virtualEnvPython) {
     $pythonExecutable = $virtualEnvPython
@@ -46,12 +61,12 @@ if (-not $backendPid) {
     Start-Process -FilePath $pythonExecutable -ArgumentList 'app.py' -WorkingDirectory $backendPath -RedirectStandardOutput (Join-Path $runtimePath 'backend.log') -RedirectStandardError (Join-Path $runtimePath 'backend-error.log') -WindowStyle Hidden | Out-Null
 }
 if (-not $frontendPid) {
-    Start-Process -FilePath 'npm.cmd' -ArgumentList 'run', 'dev', '--', '--host', '127.0.0.1', '--strictPort' -WorkingDirectory $frontendPath -RedirectStandardOutput (Join-Path $runtimePath 'frontend.log') -RedirectStandardError (Join-Path $runtimePath 'frontend-error.log') -WindowStyle Hidden | Out-Null
+    Start-Process -FilePath 'npm.cmd' -ArgumentList 'run', 'dev', '--', '--host', $networkConfig.frontendBindHost, '--strictPort' -WorkingDirectory $frontendPath -RedirectStandardOutput (Join-Path $runtimePath 'frontend.log') -RedirectStandardError (Join-Path $runtimePath 'frontend-error.log') -WindowStyle Hidden | Out-Null
 }
 
 $ready = $false
 for ($attempt = 0; $attempt -lt 40; $attempt++) {
-    if ((Test-HttpUrl 'http://127.0.0.1:5001/api/health') -and (Test-HttpUrl 'http://127.0.0.1:5173/')) {
+    if ((Test-HttpUrl "$localBackendUrl/api/health") -and (Test-HttpUrl "$localFrontendUrl/")) {
         $ready = $true
         break
     }
@@ -59,11 +74,11 @@ for ($attempt = 0; $attempt -lt 40; $attempt++) {
 }
 if (-not $ready) { throw 'Startup failed. Check files in the .runtime directory.' }
 
-$backendPid = Get-ListeningPid 5001
-$frontendPid = Get-ListeningPid 5173
+$backendPid = Get-ListeningPid $networkConfig.labelBackendPort
+$frontendPid = Get-ListeningPid $networkConfig.labelFrontendPort
 if ($backendPid) { Set-Content -LiteralPath (Join-Path $runtimePath 'backend.pid') -Value $backendPid -Encoding ASCII }
 if ($frontendPid) { Set-Content -LiteralPath (Join-Path $runtimePath 'frontend.pid') -Value $frontendPid -Encoding ASCII }
 
 Write-Host 'Label tool started:' -ForegroundColor Green
-Write-Host 'http://127.0.0.1:5173/'
+Write-Host "$publicFrontendUrl/"
 Write-Host 'To stop the services, run: .\stop.ps1'

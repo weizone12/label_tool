@@ -2,6 +2,7 @@ $ErrorActionPreference = 'Stop'
 
 $authRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $runtimePath = Join-Path $authRoot '.runtime'
+$networkConfig = Get-Content -LiteralPath (Join-Path (Split-Path -Parent $authRoot) 'network-config.json') -Raw | ConvertFrom-Json
 
 function Get-ListeningPid([int]$Port) {
     $pattern = '^\s*TCP\s+\S+:' + $Port + '\s+\S+\s+LISTENING\s+(\d+)\s*$'
@@ -17,7 +18,7 @@ foreach ($name in @('backend.pid', 'frontend.pid')) {
     if ($process) { Stop-Process -Id $processId -Force }
     Remove-Item -LiteralPath $pidPath -Force
 }
-foreach ($port in @(5002, 5174)) {
+foreach ($port in @($networkConfig.authBackendPort, $networkConfig.authFrontendPort)) {
     $listeningPid = Get-ListeningPid $port
     if ($listeningPid) { Stop-Process -Id $listeningPid -Force -ErrorAction SilentlyContinue }
 }

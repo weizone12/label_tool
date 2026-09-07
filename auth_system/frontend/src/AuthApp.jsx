@@ -6,6 +6,23 @@ import UserManagement from './pages/UserManagement'
 
 const authPaths = ['/login', '/change-password', '/admin/users', '/auth-home']
 export const isAuthPath = () => authPaths.includes(window.location.pathname)
+const labelToolOrigin = import.meta.env.VITE_LABEL_TOOL_ORIGIN || `${window.location.protocol}//${window.location.hostname}:${import.meta.env.VITE_LABEL_TOOL_PORT}`
+
+export const rememberReturnTarget = () => {
+  const requested = new URLSearchParams(window.location.search).get('next')
+  if (!requested) return
+  try {
+    const target = new URL(requested)
+    if (target.origin === labelToolOrigin) sessionStorage.setItem('auth_return_to', target.href)
+  } catch { /* Ignore malformed or untrusted redirect targets. */ }
+}
+
+export const finishAuthentication = () => {
+  const target = sessionStorage.getItem('auth_return_to')
+  sessionStorage.removeItem('auth_return_to')
+  if (target) window.location.assign(target)
+  else go('/auth-home')
+}
 
 export const go = (path) => {
   window.history.pushState({}, '', path)
@@ -15,6 +32,7 @@ export const go = (path) => {
 export default function AuthApp() {
   const [path, setPath] = useState(window.location.pathname)
   useEffect(() => {
+    rememberReturnTarget()
     const update = () => setPath(window.location.pathname)
     window.addEventListener('popstate', update)
     return () => window.removeEventListener('popstate', update)

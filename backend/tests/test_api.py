@@ -1,8 +1,10 @@
 import io
+import json
 import os
 import tempfile
 import unittest
 import uuid
+import zipfile
 from pathlib import Path
 
 from PIL import Image
@@ -15,6 +17,7 @@ class ApiTestCase(unittest.TestCase):
         import importlib
         import app as app_module
         self.app_module = importlib.reload(app_module)
+        self.app_module.app.config["AUTH_DISABLED_FOR_TESTS"] = True
         self.client = self.app_module.app.test_client()
 
     def tearDown(self):
@@ -67,6 +70,64 @@ class ApiTestCase(unittest.TestCase):
         response = self.client.delete(f"/api/projects/{project_id}")
         self.assertEqual(response.status_code, 204)
         self.assertFalse((Path(self.temp_dir.name) / "projects" / "測試專案").exists())
+
+    def test_project_download_contains_media_and_only_completed_annotations(self):
+        project = self.client.post("/api/projects", json={
+            "name": "下載專案", "primaryMode": "rectangle",
+            "labels": [{"id": "item", "name": "物件", "color": "#ff0000", "attributes": [
+                {"id": "7395e646-e390-4b8a-92c7-e67f04227377", "name": "遮擋程度", "type": "text"},
+            ]}],
+        }).get_json()
+        uploaded = []
+        for filename in ("completed.png", "pending.png"):
+            image_buffer = io.BytesIO()
+            Image.new("RGB", (20, 10), "white").save(image_buffer, format="PNG")
+            image_buffer.seek(0)
+            response = self.client.post(
+                f"/api/projects/{project['id']}/images",
+                data={"files": (image_buffer, filename)}, content_type="multipart/form-data",
+            )
+            uploaded.append(response.get_json()[0])
+
+        for image, completed in zip(uploaded, (True, False)):
+            self.client.put(f"/api/projects/{project['id']}/images/{image['id']}/annotation", json={
+                "annotations": ([{
+                    "id": str(uuid.uuid4()), "mode": "rectangle", "label_id": "item",
+                    "geometry": {"x": 1, "y": 1, "width": 5, "height": 4},
+                    "attributes": {"7395e646-e390-4b8a-92c7-e67f04227377": "部分遮擋"},
+                }, {
+                    "id": str(uuid.uuid4()), "mode": "rectangle", "label_id": "item",
+                    "geometry": {"x": 8, "y": 2, "width": 6, "height": 5}, "attributes": {},
+                }] if completed else []),
+                "classifications": [], "completed": completed, "revision": 0,
+            })
+
+        response = self.client.get(f"/api/projects/{project['id']}/download")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.mimetype, "application/zip")
+        archive_data = response.data
+        response.close()
+        with zipfile.ZipFile(io.BytesIO(archive_data)) as bundle:
+            names = set(bundle.namelist())
+            self.assertIn("dataset.json", names)
+            self.assertIn("images/completed.png", names)
+            self.assertIn("images/pending.png", names)
+            self.assertIn("annotations/images/completed.png.json", names)
+            self.assertNotIn("annotations/images/pending.png.json", names)
+            annotation = json.loads(bundle.read("annotations/images/completed.png.json"))
+            dataset = json.loads(bundle.read("dataset.json"))
+            self.assertEqual(annotation["media"]["file_name"], "images/completed.png")
+            self.assertNotIn("source_path", annotation["media"])
+            self.assertNotIn("revision", annotation)
+            self.assertNotIn("updatedAt", annotation)
+            self.assertNotIn("editor_state", annotation)
+            self.assertEqual([item["id"] for item in annotation["annotations"]], [1, 2])
+            self.assertEqual(annotation["annotations"][0]["bbox"], [1, 1, 5, 4])
+            self.assertEqual(annotation["annotations"][0]["attributes"], {"遮擋程度": "部分遮擋"})
+            self.assertNotIn("geometry", annotation["annotations"][0])
+            self.assertEqual(dataset["labels"][0]["attributes"], [{"name": "遮擋程度", "type": "text"}])
+            self.assertEqual(len(dataset["samples"]), 1)
+            self.assertEqual(dataset["samples"][0]["annotations"][1]["bbox"], [8, 2, 6, 5])
 
     def test_ocr_project_gets_internal_text_label(self):
         response = self.client.post("/api/projects", json={
@@ -180,8 +241,15 @@ class ApiTestCase(unittest.TestCase):
         project = response.get_json()
         self.assertEqual(project["projectType"], "editing")
         self.assertEqual(project["primaryMode"], "reid")
-        self.assertEqual(project["mediaType"], "both")
+        self.assertEqual(project["mediaType"], "video")
         self.assertEqual(project["labels"], [])
+        rejected = self.client.post(
+            f"/api/projects/{project['id']}/images",
+            data={"files": (io.BytesIO(b"not-an-image"), "photo.jpg")},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(rejected.status_code, 201)
+        self.assertEqual(rejected.get_json(), [])
 
     def test_only_reid_accepts_video_input(self):
         reid = self.client.post("/api/projects", json={"name": "reid video", "primaryMode": "reid", "labels": [{"id": "person", "name": "person", "color": "#ff0000"}]}).get_json()
@@ -198,6 +266,8 @@ class ApiTestCase(unittest.TestCase):
             "reid_edit_only": True,
             "bbox_source_name": "detections.jsonl",
             "frame_timeline": [{"frame_index": 0, "video_pts_s": 0.0}],
+            "mmsi_source_name": "ais.jsonl",
+            "mmsi_records": [{"mmsi": "123456789", "x": 10, "y": 20}],
         }
         response = self.client.put(
             f"/api/projects/{reid['id']}/images/{video['id']}/annotation",

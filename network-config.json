@@ -1,0 +1,10 @@
+{
+  "scheme": "http",
+  "publicHost": "192.168.55.58",
+  "frontendBindHost": "0.0.0.0",
+  "backendBindHost": "127.0.0.1",
+  "labelFrontendPort": 5173,
+  "labelBackendPort": 5001,
+  "authFrontendPort": 5174,
+  "authBackendPort": 5002
+}

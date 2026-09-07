@@ -2,12 +2,13 @@ import { useMemo, useState } from 'react'
 import { ArrowLeft, Check, Plus, Trash2 } from 'lucide-react'
 import { api } from '../api'
 import { modeName } from '../App'
+import { createId } from '../uuid'
 
 const MODE_OPTIONS = ['rectangle', 'polygon', 'ocr', 'rotated_rectangle', 'semantic_segmentation', 'instance_segmentation', 'reid', 'classification']
 const COLORS = ['#fb7185', '#f59e0b', '#84cc16', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6', '#ec4899']
 
 const blankLabel = (index = 0) => ({
-  id: crypto.randomUUID(), name: '', color: COLORS[index % COLORS.length], attributes: [],
+  id: createId(), name: '', color: COLORS[index % COLORS.length], attributes: [],
 })
 
 const readableLabelId = (name, index) => name.trim().toLocaleLowerCase().replace(/[^\p{L}\p{N}_-]+/gu, '-').replace(/^[-_]+|[-_]+$/g, '') || `label-${index + 1}`
@@ -25,7 +26,7 @@ export default function ProjectSetup({ onCancel, onCreated }) {
 
   const updateLabel = (id, patch) => setLabels((all) => all.map((label) => label.id === id ? { ...label, ...patch } : label))
   const addAttribute = (labelId) => setLabels((all) => all.map((label) => label.id === labelId ? {
-    ...label, attributes: [...label.attributes, { id: crypto.randomUUID(), name: '', type: 'text' }],
+    ...label, attributes: [...label.attributes, { id: createId(), name: '', type: 'text' }],
   } : label))
 
   const submit = async () => {
@@ -40,7 +41,7 @@ export default function ProjectSetup({ onCancel, onCreated }) {
         id: 'ocr-text', name: '文字', color: '#22d3ee', system: true,
         attributes: [{ id: 'transcription', name: '辨識文字', type: 'text', system: true }],
       }, ...cleanLabels]
-      onCreated(await api.createProject({ name: name.trim(), projectType, primaryMode: selectedMode, labels: cleanLabels, ...(selectedMode === 'classification' ? { classificationMode } : {}), mediaType: selectedMode === 'reid' ? 'both' : 'image' }))
+      onCreated(await api.createProject({ name: name.trim(), projectType, primaryMode: selectedMode, labels: cleanLabels, ...(selectedMode === 'classification' ? { classificationMode } : {}), mediaType: projectType === 'editing' ? 'video' : (selectedMode === 'reid' ? 'both' : 'image') }))
     } catch (err) { setError(err.message) }
   }
 
@@ -57,7 +58,7 @@ export default function ProjectSetup({ onCancel, onCreated }) {
           return <button key={mode} className={`option-card ${selected ? 'selected' : ''}`} onClick={() => setPrimaryMode(mode)}>{selected && <Check size={17} />}{modeName(mode)}</button>
         })}</div></div> : <div className="field"><span>純修改方式</span><small>ReID bbox JSONL 純修改；不可新增、移動、縮放或刪除標註框。</small></div>}
         {selectedMode === 'classification' && <label className="field"><span>圖片分類模式</span><select value={classificationMode} onChange={(e) => setClassificationMode(e.target.value)}><option value="single">單一分類</option><option value="multiple">多標籤分類</option></select></label>}
-        {selectedMode === 'reid' && <div className="field"><span>ReID 資料來源</span><small>可載入圖片或影片。</small></div>}
+        {selectedMode === 'reid' && <div className="field"><span>ReID 資料來源</span><small>{projectType === 'editing' ? '純修改專案只可載入影片。' : '可載入圖片或影片。'}</small></div>}
       </section>
       {labelsRequired && <section className="setup-section">
         <div className="section-title"><div><span className="step-mark">02</span><h2>Labels</h2></div><button className="secondary-button" onClick={() => setLabels([...labels, blankLabel(labels.length)])}><Plus size={16} />新增 label</button></div>

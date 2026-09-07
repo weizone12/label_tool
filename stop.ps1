@@ -2,6 +2,8 @@ $ErrorActionPreference = 'Stop'
 
 $allowedNames = @('python', 'node')
 $stopped = @()
+$labelToolRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+$networkConfig = Get-Content -LiteralPath (Join-Path $labelToolRoot 'network-config.json') -Raw | ConvertFrom-Json
 
 function Get-ListeningPids([int]$Port) {
     $result = @()
@@ -12,7 +14,7 @@ function Get-ListeningPids([int]$Port) {
     return @($result | Select-Object -Unique)
 }
 
-foreach ($port in @(5001, 5173)) {
+foreach ($port in @($networkConfig.labelBackendPort, $networkConfig.labelFrontendPort)) {
     foreach ($targetPid in @(Get-ListeningPids $port)) {
         $targetProcess = Get-Process -Id $targetPid -ErrorAction SilentlyContinue
         if (-not $targetProcess) { continue }
@@ -23,7 +25,7 @@ foreach ($port in @(5001, 5173)) {
     }
 }
 
-$runtimePath = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) '.runtime'
+$runtimePath = Join-Path $labelToolRoot '.runtime'
 foreach ($pidFile in @('backend.pid', 'frontend.pid')) {
     $pidPath = Join-Path $runtimePath $pidFile
     if (Test-Path -LiteralPath $pidPath) { Remove-Item -LiteralPath $pidPath -Force }
