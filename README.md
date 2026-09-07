@@ -34,6 +34,39 @@ cd auth_system
 powershell -ExecutionPolicy Bypass -File .\start.ps1
 ```
 
+## Linux 啟動與停止
+
+首次 clone 後建立專案內的虛擬環境並安裝相依套件：
+
+```bash
+python3 -m venv backend/.venv
+backend/.venv/bin/pip install -r backend/requirements.txt
+python3 -m venv auth_system/backend/.venv
+auth_system/backend/.venv/bin/pip install -r auth_system/backend/requirements.txt
+npm ci --prefix frontend
+npm ci --prefix auth_system/frontend
+chmod +x start.sh stop.sh
+```
+
+設定首次管理員與固定 Session 密鑰後，一次啟動登入及標註服務：
+
+```bash
+export AUTH_BOOTSTRAP_ADMIN_USERNAME='admin'
+export AUTH_BOOTSTRAP_ADMIN_PASSWORD='請使用至少 12 字元的臨時密碼'
+export AUTH_SECRET_KEY='請設定長且隨機的固定密鑰'
+./start.sh
+```
+
+停止全部服務：
+
+```bash
+./stop.sh
+```
+
+Linux 腳本與 Windows 腳本共用 `network-config.json`。部署前請將 `publicHost`
+改成 Linux 主機可供使用者連線的 IP。Linux 不支援伺服器端 Windows 原生檔案選擇視窗，
+但瀏覽器的檔案上傳功能可正常使用。
+
 ## 分別啟動
 後端：
 ```powershell
