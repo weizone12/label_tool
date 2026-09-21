@@ -79,6 +79,7 @@ const toEditorDocument = (document) => ({ ...document, annotations: (document.an
 const toStoredDocument = (document) => ({ ...document, annotations: (document.annotations || []).map(toStoredAnnotation) })
 
 export const api = {
+  logout: () => request('/api/auth/logout', { method: 'POST' }),
   listManagedUsers: async () => (await request('/api/admin/users')).users,
   getAssignments: async (id) => (await request(`/api/projects/${id}/assignments`)).user_ids,
   updateAssignments: async (id, userIds) => (await request(`/api/projects/${id}/assignments`, {

@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
-import { Boxes, Plus, Trash2, Users } from 'lucide-react'
+import { Boxes, LogOut, Plus, Trash2, Users } from 'lucide-react'
 import { api } from './api'
-import { useAuth } from './AuthGate'
+import { authUrl, useAuth } from './AuthGate'
 import AssignmentDialog from './components/AssignmentDialog'
 import ProjectSetup from './components/ProjectSetup'
 import Workspace from './components/Workspace'
@@ -13,20 +13,39 @@ export default function App() {
   const [creating, setCreating] = useState(false)
   const [error, setError] = useState('')
   const [assigning, setAssigning] = useState(null)
+  const [loggingOut, setLoggingOut] = useState(false)
 
   const refresh = async () => {
     try { setProjects(await api.listProjects()) } catch (err) { setError(err.message) }
   }
   useEffect(() => { refresh() }, [])
 
+  const logout = async () => {
+    setLoggingOut(true)
+    setError('')
+    try {
+      await api.logout()
+      window.location.reload()
+    } catch (err) {
+      setError(err.message)
+      setLoggingOut(false)
+    }
+  }
+
   if (active) return <Workspace project={active} isAdmin={user.is_admin} onExit={() => { setCreating(false); setActive(null); refresh() }} />
   if (creating) return <ProjectSetup onCancel={() => setCreating(false)} onCreated={(project) => setActive(project)} />
 
   return (
     <main className="home-shell">
+      <button className="secondary-button home-logout" onClick={logout} disabled={loggingOut}>
+        <LogOut size={16} />{loggingOut ? '登出中…' : '登出'}
+      </button>
       <header className="home-header">
         <div><span className="eyebrow">LOCAL ANNOTATION WORKSPACE</span><h1>MIKO 標註達人</h1><p>管理資料集，建立精確且可追溯的標註。</p></div>
-        {user.is_admin && <button className="primary-button" onClick={() => setCreating(true)}><Plus size={18} />建立專案</button>}
+        {user.is_admin && <div className="home-actions">
+          <button className="secondary-button" onClick={() => window.location.assign(authUrl('/admin/users'))}><Users size={18} />管理使用者</button>
+          <button className="primary-button" onClick={() => setCreating(true)}><Plus size={18} />建立專案</button>
+        </div>}
       </header>
       {error && <div className="error-banner">{error}</div>}
       <section className="project-grid">

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { authApi } from '../api'
-import { go } from '../AuthApp'
+import { finishAuthentication } from '../AuthApp'
 
 export default function UserManagement() {
   const [users, setUsers] = useState([])
@@ -24,7 +24,7 @@ export default function UserManagement() {
     try { await authApi.updateUser(user.id, { username }); refresh() }
     catch (err) { setError(err.message) }
   }
-  return <main className="auth-admin"><header><h1>使用者管理</h1><button onClick={() => go('/auth-home')}>返回</button></header>
+  return <main className="auth-admin"><header><h1>使用者管理</h1><button onClick={finishAuthentication}>返回標註工具</button></header>
     <form className="auth-card compact" onSubmit={create}>
       <h2>建立使用者</h2><label>username<input required value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} /></label>
       <label>display_name<input value={form.display_name} onChange={(e) => setForm({ ...form, display_name: e.target.value })} /></label>

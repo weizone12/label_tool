@@ -21,7 +21,7 @@ export const finishAuthentication = () => {
   const target = sessionStorage.getItem('auth_return_to')
   sessionStorage.removeItem('auth_return_to')
   if (target) window.location.assign(target)
-  else go('/auth-home')
+  else window.location.assign(labelToolOrigin)
 }
 
 export const go = (path) => {

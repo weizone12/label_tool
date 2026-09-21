@@ -4,7 +4,7 @@ const authOrigin = import.meta.env.VITE_AUTH_ORIGIN || `${window.location.protoc
 const AuthContext = createContext(null)
 export const useAuth = () => useContext(AuthContext)
 
-function authUrl(path) {
+export function authUrl(path) {
   const target = encodeURIComponent(window.location.href)
   return `${authOrigin}${path}?next=${target}`
 }
