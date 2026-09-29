@@ -106,8 +106,11 @@ h1, h2, p { margin-top: 0; }
 .canvas-wrap svg.panning { cursor: grabbing; }
 .annotation-shape { pointer-events: none; }
 .draft-shape { fill: rgba(45,212,191,.12); stroke: var(--accent); stroke-dasharray: 7 5; pointer-events: none; }
+.draft-shape.boundary-chain-preview { stroke: #064e3b; stroke-dasharray: 4 3; filter: drop-shadow(0 0 2px rgba(255,255,255,.9)); }
 .vertex { pointer-events: none; }
 .vertex.draft { fill: #fff; stroke: var(--accent); }
+.snap-indicator { pointer-events: none; fill: rgba(45,212,191,.22); stroke: #fff; }
+.snap-indicator.edge { fill: rgba(56,189,248,.22); stroke: #38bdf8; }
 .zoom-indicator, .drawing-hint { position: absolute; bottom: 12px; background: rgba(8,13,20,.86); border: 1px solid #293649; border-radius: 6px; padding: 5px 8px; font: 500 11px 'DM Mono'; color: #b7c2d0; }
 .zoom-indicator { right: 12px; }
 .drawing-hint { left: 50%; transform: translateX(-50%); color: #99f6e4; }

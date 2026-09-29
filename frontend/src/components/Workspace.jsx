@@ -3,6 +3,7 @@ import { ArrowLeft, Check, ChevronLeft, ChevronRight, Download, Eye, EyeOff, Fol
 import { api } from '../api'
 import AnnotationCanvas from './AnnotationCanvas'
 import { createId } from '../uuid'
+import { hydrateSegmentationTopology, insertSharedVertices, updateSharedVertices } from '../segmentationTopology'
 
 const TOOL_NAMES = {
   rectangle: '矩形', polygon: '多邊形', ocr: 'OCR 四邊形', rotated_rectangle: '三點旋轉矩形',
@@ -117,6 +118,7 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
   const [uploadProgress, setUploadProgress] = useState({ current: 0, total: 0 })
 
   const saveTimer = useRef(null)
+  const draftActiveRef = useRef(false)
   const finishInProgress = useRef(false)
   const ocrInputRef = useRef(null)
   const fileInputRef = useRef(null)
@@ -148,12 +150,13 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
     setVideoMetadata(null)
     api.getAnnotation(project.id, currentImage.id).then((data) => {
       if (cancelled) return
-      const annotations = project.primaryMode === 'reid' && currentImage.mediaType === 'video' ? regenerateReidAnnotations(data.annotations) : data.annotations
+      const sourceAnnotations = project.primaryMode === 'reid' && currentImage.mediaType === 'video' ? regenerateReidAnnotations(data.annotations) : data.annotations
+      const annotations = hydrateSegmentationTopology(sourceAnnotations)
       const materialized = { ...data, annotations }
       const restoredAisRecords = Array.isArray(data.editor_state?.mmsi_records) ? data.editor_state.mmsi_records : []
       const restoredMmsiValues = [...new Set(restoredAisRecords.map((item) => item.mmsi))].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
       setDocument(materialized); setPast([]); setFuture([]); setSelectedId(null); setCurrentFrame(0); setAisRecords(restoredAisRecords); setSelectedMmsi(restoredMmsiValues[0] || ''); setAisSourceName(data.editor_state?.mmsi_source_name || ''); setSaveState('已儲存')
-      if (JSON.stringify(annotations) !== JSON.stringify(data.annotations)) {
+      if (JSON.stringify(sourceAnnotations) !== JSON.stringify(data.annotations)) {
         api.saveAnnotation(project.id, currentImage.id, materialized).then((saved) => {
           if (!cancelled) setDocument((current) => ({ ...current, revision: saved.revision, updatedAt: saved.updatedAt }))
         }).catch((err) => { if (!cancelled) setError(err.message) })
@@ -245,6 +248,7 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
 
   useEffect(() => {
     const handler = (event) => {
+      if (draftActiveRef.current && (['Backspace', 'Delete'].includes(event.key) || ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z'))) return
       const typing = ['INPUT', 'TEXTAREA', 'SELECT'].includes(window.document.activeElement?.tagName)
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') { event.preventDefault(); event.shiftKey ? redo() : undo(); return }
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'y') { event.preventDefault(); redo(); return }
@@ -258,6 +262,8 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
   }, [deleteSelected, finishAndNext, navigate, redo, undo])
+
+  const handleDraftActiveChange = useCallback((active) => { draftActiveRef.current = active }, [])
 
   const selected = document.annotations.find((item) => item.id === selectedId)
   const selectedLabel = project.labels.find((label) => label.id === selected?.labelId)
@@ -400,18 +406,26 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
     return { ...current, classifications }
   })
 
-  const handleCanvasCommit = (annotation) => {
+  const handleCanvasCommit = (annotation, edgeInsertions = []) => {
     const enriched = {
       ...annotation,
       ...(currentImage?.mediaType === 'video' ? { frame_id: currentFrame, keyframe: true } : {}),
       ...(tool === 'reid' ? { identity_id: '', track_id: null, camera_id: null, video_id: null, frame_id: currentImage?.mediaType === 'video' ? currentFrame : null } : {}),
     }
     commit((current) => {
-      const annotations = [...current.annotations, enriched]
+      const annotations = [...insertSharedVertices(current.annotations, edgeInsertions), enriched]
       return { ...current, annotations: tool === 'reid' ? regenerateReidAnnotations(annotations) : annotations }
     })
     setSelectedId(enriched.id)
   }
+
+  const handleCanvasUpdate = (id, points, topologyChanges) => commit((current) => {
+    const annotations = updateSharedVertices(current.annotations, id, points, topologyChanges)
+    const marked = annotations.map((item) => item.id === id && item.type === 'reid' && item.generated === true
+      ? { ...item, keyframe: true, generated: false }
+      : item)
+    return { ...current, annotations: tool === 'reid' ? regenerateReidAnnotations(marked) : marked }
+  })
 
   const classificationLabels = project.labels.filter((label) => !label.system)
   const activeLabel = project.labels.find((label) => label.id === activeLabelId)
@@ -588,7 +602,7 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
         </aside>
         <section className="canvas-column">
           <div className="mode-banner on">{reidEditOnly ? `ReID 純修改模式 · bbox 已鎖定 · 可修改屬性與 ID${document.editor_state?.bbox_source_name ? ` · ${document.editor_state.bbox_source_name}` : ''}` : tool === 'classification' ? '圖片分類模式 · 於右側選擇圖片層級 label · 右鍵拖曳視角' : '整合模式 · 左鍵標註／編輯 · 右鍵拖曳視角'}</div>
-          {!currentImage ? (progressFilter === 'all' ? <div className="upload-empty"><ImagePlus size={46} /><strong>{isAdmin ? '載入圖片／影片資料集' : '專案目前沒有可標註資料'}</strong><span>{isAdmin ? '可選擇多個檔案或整個資料夾；檔案會複製至專案資料夾' : '請聯絡管理員加入圖片或影片'}</span>{isAdmin && <div className="upload-actions"><button className="primary-button" onClick={() => fileInputRef.current?.click()} disabled={uploading}><ImagePlus size={16} />選擇檔案</button><button className="secondary-button" onClick={() => folderInputRef.current?.click()} disabled={uploading}><FolderOpen size={16} />選擇資料夾</button></div>}</div> : <div className="upload-empty"><strong>此分群沒有檔案</strong><span>{progressFilter === 'completed' ? '目前沒有已完成的資料' : '目前沒有未完成的資料'}</span></div>) : <AnnotationCanvas key={currentImage.id} image={currentImage} imageUrl={api.imageUrl(project.id, currentImage.id)} annotations={visibleAnnotations} labels={project.labels} activeLabelId={tool === 'ocr' ? 'ocr-text' : activeLabelId} tool={tool} selectedId={selectedId} onSelect={setSelectedId} onCommit={reidEditOnly ? () => {} : handleCanvasCommit} onUpdate={reidEditOnly ? () => {} : (id, points) => commit((current) => { const annotations = current.annotations.map((item) => item.id === id ? { ...item, points, ...(item.type === 'reid' && item.generated === true ? { keyframe: true, generated: false } : {}) } : item); return { ...current, annotations: tool === 'reid' ? regenerateReidAnnotations(annotations) : annotations } })} resetToken={resetToken} currentFrame={currentFrame} onFrameChange={(frame) => { setCurrentFrame(frame); setSelectedId(null) }} readOnlyGeometry={reidEditOnly} frameTimeline={frameTimeline} onVideoMetadata={setVideoMetadata} overlayPoints={aisOverlayPoints} />}
+          {!currentImage ? (progressFilter === 'all' ? <div className="upload-empty"><ImagePlus size={46} /><strong>{isAdmin ? '載入圖片／影片資料集' : '專案目前沒有可標註資料'}</strong><span>{isAdmin ? '可選擇多個檔案或整個資料夾；檔案會複製至專案資料夾' : '請聯絡管理員加入圖片或影片'}</span>{isAdmin && <div className="upload-actions"><button className="primary-button" onClick={() => fileInputRef.current?.click()} disabled={uploading}><ImagePlus size={16} />選擇檔案</button><button className="secondary-button" onClick={() => folderInputRef.current?.click()} disabled={uploading}><FolderOpen size={16} />選擇資料夾</button></div>}</div> : <div className="upload-empty"><strong>此分群沒有檔案</strong><span>{progressFilter === 'completed' ? '目前沒有已完成的資料' : '目前沒有未完成的資料'}</span></div>) : <AnnotationCanvas key={currentImage.id} image={currentImage} imageUrl={api.imageUrl(project.id, currentImage.id)} annotations={visibleAnnotations} labels={project.labels} activeLabelId={tool === 'ocr' ? 'ocr-text' : activeLabelId} tool={tool} selectedId={selectedId} onSelect={setSelectedId} onCommit={reidEditOnly ? () => {} : handleCanvasCommit} onUpdate={reidEditOnly ? () => {} : handleCanvasUpdate} onDraftActiveChange={handleDraftActiveChange} resetToken={resetToken} currentFrame={currentFrame} onFrameChange={(frame) => { setCurrentFrame(frame); setSelectedId(null) }} readOnlyGeometry={reidEditOnly} frameTimeline={frameTimeline} onVideoMetadata={setVideoMetadata} overlayPoints={aisOverlayPoints} />}
           <footer className="image-nav"><button onClick={() => navigate(-1)} disabled={index === 0}><ChevronLeft size={18} />上一張</button><div className="progress-track"><span style={{ width: images.length ? `${((index + 1) / images.length) * 100}%` : '0%' }} /></div><button onClick={() => navigate(1)} disabled={index >= images.length - 1}>下一張<ChevronRight size={18} /></button></footer>
         </section>
         <aside className="inspector-panel">

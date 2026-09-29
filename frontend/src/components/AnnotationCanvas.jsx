@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createId } from '../uuid'
+import { boundaryChains, insertSharedVertices, isSegmentation } from '../segmentationTopology'
+
+export const DEFAULT_SNAP_TOLERANCE = 10
 
 const distanceToSegment = (p, a, b) => {
   const dx = b.x - a.x, dy = b.y - a.y
@@ -34,14 +37,14 @@ const annotationPoints = (item) => {
   return item.points
 }
 
-const movePoints = (points, dx, dy) => points.map((point) => ({ x: point.x + dx, y: point.y + dy }))
+const movePoints = (points, dx, dy) => points.map((point) => ({ ...point, x: point.x + dx, y: point.y + dy }))
 
 const editVertex = (item, vertexIndex, point) => {
   if (['rectangle', 'reid'].includes(item.type)) {
     const displayed = annotationPoints(item)
     return [point, displayed[(vertexIndex + 2) % 4]]
   }
-  return item.points.map((current, index) => index === vertexIndex ? point : current)
+  return item.points.map((current, index) => index === vertexIndex ? { ...current, x: point.x, y: point.y } : current)
 }
 
 const nearestTimelineFrame = (timeline, time) => {
@@ -57,19 +60,24 @@ const nearestTimelineFrame = (timeline, time) => {
   return Math.abs(previous.video_pts_s - time) <= Math.abs(next.video_pts_s - time) ? previous.frame_index : next.frame_index
 }
 
-export default function AnnotationCanvas({ image, imageUrl, annotations, labels, activeLabelId, tool, selectedId, onSelect, onCommit, onUpdate, resetToken, currentFrame = 0, onFrameChange, readOnlyGeometry = false, frameTimeline = [], onVideoMetadata, overlayPoints = [] }) {
+export default function AnnotationCanvas({ image, imageUrl, annotations, labels, activeLabelId, tool, selectedId, onSelect, onCommit, onUpdate, onDraftActiveChange, resetToken, currentFrame = 0, onFrameChange, readOnlyGeometry = false, frameTimeline = [], onVideoMetadata, overlayPoints = [], snapTolerance = DEFAULT_SNAP_TOLERANCE }) {
   const svgRef = useRef(null)
   const videoRef = useRef(null)
   const [view, setView] = useState({ x: 0, y: 0, zoom: 1 })
   const [draft, setDraft] = useState([])
+  const [draftInsertions, setDraftInsertions] = useState([])
+  const [draftActions, setDraftActions] = useState([])
+  const [routeToggle, setRouteToggle] = useState(false)
   const [cursor, setCursor] = useState(null)
   const [interaction, setInteraction] = useState(null)
   const [dragPreview, setDragPreview] = useState(null)
   const cycleRef = useRef({ x: 0, y: 0, index: -1 })
   const visibleAnnotations = useMemo(() => annotations.filter((item) => !item.hidden), [annotations])
 
-  useEffect(() => { setView({ x: 0, y: 0, zoom: 1 }); setDraft([]) }, [image.id, resetToken])
-  useEffect(() => { setDraft([]) }, [tool])
+  useEffect(() => { setView({ x: 0, y: 0, zoom: 1 }); setDraft([]); setDraftInsertions([]); setDraftActions([]); setRouteToggle(false) }, [image.id, resetToken])
+  useEffect(() => { setDraft([]); setDraftInsertions([]); setDraftActions([]); setRouteToggle(false) }, [tool])
+  useEffect(() => { onDraftActiveChange?.(draft.length > 0) }, [draft.length, onDraftActiveChange])
+  useEffect(() => () => onDraftActiveChange?.(false), [onDraftActiveChange])
 
   const screenToImage = useCallback((event) => {
     const svg = svgRef.current
@@ -78,23 +86,171 @@ export default function AnnotationCanvas({ image, imageUrl, annotations, labels,
     return { x: Math.max(0, Math.min(image.width, transformed.x)), y: Math.max(0, Math.min(image.height, transformed.y)) }
   }, [image.height, image.width])
 
+  const imageToScreen = (point) => {
+    const svgPoint = svgRef.current.createSVGPoint()
+    svgPoint.x = point.x; svgPoint.y = point.y
+    return svgPoint.matrixTransform(svgRef.current.getScreenCTM())
+  }
+
+  const topologyAnnotations = (includeHidden = false) => insertSharedVertices(
+    (includeHidden ? annotations : visibleAnnotations).filter((item) => item.type === tool),
+    draftInsertions,
+  )
+
+  const sharedEdgeInsertions = (snap, point) => topologyAnnotations(true).flatMap((annotation) => annotation.points.flatMap((start, index) => {
+    const end = annotation.points[(index + 1) % annotation.points.length]
+    const sameDirection = start.vertexId === snap.startVertexId && end.vertexId === snap.endVertexId
+    const reverseDirection = start.vertexId === snap.endVertexId && end.vertexId === snap.startVertexId
+    if (!sameDirection && !reverseDirection) return []
+    return [{
+      annotationId: annotation.id,
+      startVertexId: start.vertexId,
+      endVertexId: end.vertexId,
+      t: sameDirection ? snap.t : 1 - snap.t,
+      point,
+    }]
+  }))
+
+  const findTopologySnap = (event) => {
+    if (!isSegmentation(tool)) return null
+    const candidates = topologyAnnotations()
+    let nearestVertex = null
+    for (const annotation of candidates) {
+      for (const point of annotation.points) {
+        const screen = imageToScreen(point)
+        const distance = Math.hypot(event.clientX - screen.x, event.clientY - screen.y)
+        if (distance <= snapTolerance && (!nearestVertex || distance < nearestVertex.distance)) {
+          nearestVertex = { kind: 'vertex', point, annotationId: annotation.id, distance }
+        }
+      }
+    }
+    if (nearestVertex) return nearestVertex
+
+    let nearestEdge = null
+    for (const annotation of candidates) {
+      annotation.points.forEach((start, index) => {
+        const end = annotation.points[(index + 1) % annotation.points.length]
+        const a = imageToScreen(start), b = imageToScreen(end)
+        const dx = b.x - a.x, dy = b.y - a.y
+        const length2 = dx * dx + dy * dy
+        if (!length2) return
+        const t = Math.max(0, Math.min(1, ((event.clientX - a.x) * dx + (event.clientY - a.y) * dy) / length2))
+        const distance = Math.hypot(event.clientX - (a.x + t * dx), event.clientY - (a.y + t * dy))
+        if (distance <= snapTolerance && (!nearestEdge || distance < nearestEdge.distance)) {
+          nearestEdge = {
+            kind: 'edge', annotationId: annotation.id, startVertexId: start.vertexId, endVertexId: end.vertexId,
+            t, distance, point: { x: start.x + t * (end.x - start.x), y: start.y + t * (end.y - start.y) },
+          }
+        }
+      })
+    }
+    return nearestEdge
+  }
+
+  const selectBoundaryChain = (start, end, event, alternate = false) => {
+    const candidates = boundaryChains(topologyAnnotations(), start.vertexId, end.vertexId)
+    if (!candidates.length) return null
+    const endScreen = imageToScreen(end)
+    const scored = candidates.map((candidate) => {
+      const previous = candidate.points.length > 1 ? candidate.points[candidate.points.length - 2] : start
+      const previousScreen = imageToScreen(previous)
+      const dx = previousScreen.x - endScreen.x, dy = previousScreen.y - endScreen.y
+      const length = Math.hypot(dx, dy) || 1
+      const offsetX = event.clientX - endScreen.x, offsetY = event.clientY - endScreen.y
+      const along = (offsetX * dx + offsetY * dy) / length
+      const across = Math.abs(offsetX * dy - offsetY * dx) / length
+      return { ...candidate, score: across + (along < 0 ? snapTolerance + Math.abs(along) : 0) }
+    }).sort((a, b) => a.score - b.score)
+    const closest = scored[0]
+    if (!alternate) return closest.points
+    return scored.find((candidate) => candidate.annotationId === closest.annotationId && candidate.direction !== closest.direction)?.points || scored[1]?.points || closest.points
+  }
+
+  const addDraftAction = (points, insertions = []) => {
+    setDraft((items) => [...items, ...points])
+    if (insertions.length) setDraftInsertions((items) => [...items, ...insertions])
+    setDraftActions((items) => [...items, {
+      pointCount: points.length,
+      insertionVertexIds: [...new Set(insertions.map((item) => item.point.vertexId))],
+    }])
+    setRouteToggle(false)
+    setCursor((current) => current ? { ...current, chain: null, boundary: null } : current)
+  }
+
+  const undoDraftAction = () => {
+    const action = draftActions[draftActions.length - 1]
+    if (!action) return
+    setDraft((items) => items.slice(0, -action.pointCount))
+    if (action.insertionVertexIds.length) {
+      const removed = new Set(action.insertionVertexIds)
+      setDraftInsertions((items) => items.filter((item) => !removed.has(item.point.vertexId)))
+    }
+    setDraftActions((items) => items.slice(0, -1))
+    setRouteToggle(false)
+    setCursor((current) => current ? { ...current, chain: null, boundary: null } : current)
+  }
+
+  const boundaryPreviewCursor = (current, toggled, shiftKey = current?.boundary?.shiftKey) => {
+    if (!current?.boundary) return current
+    const { start, end, clientX, clientY } = current.boundary
+    const chain = selectBoundaryChain(start, end, { clientX, clientY }, Boolean(shiftKey) !== toggled)
+    return { ...current, chain, boundary: { ...current.boundary, shiftKey: Boolean(shiftKey) } }
+  }
+
   const finish = useCallback((points, type = tool) => {
     if (!activeLabelId || !points.length) return
-    onCommit({ id: createId(), type, labelId: activeLabelId, points, attributes: {}, locked: false, hidden: false, created_at: new Date().toISOString() })
+    onCommit({ id: createId(), type, labelId: activeLabelId, points, attributes: {}, locked: false, hidden: false, created_at: new Date().toISOString() }, isSegmentation(type) ? draftInsertions : [])
     setDraft([])
-  }, [activeLabelId, onCommit, tool])
+    setDraftInsertions([])
+    setDraftActions([])
+    setRouteToggle(false)
+  }, [activeLabelId, draftInsertions, onCommit, tool])
+
+  const confirmFinish = useCallback((points, type = tool) => {
+    if (!window.confirm('確定要結束目前的標註嗎？')) return
+    finish(points, type)
+  }, [finish, tool])
 
   useEffect(() => {
     const keyHandler = (event) => {
       const typing = ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)
       if (typing) return
-      if (event.key === 'Escape') setDraft([])
-      if (event.key === 'Enter' && ['polygon', 'semantic_segmentation', 'instance_segmentation'].includes(tool) && draft.length >= 3) finish(draft)
-      if (event.key === 'Backspace' && draft.length) { event.preventDefault(); setDraft((items) => items.slice(0, -1)) }
+      if (draft.length && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
+        event.preventDefault(); event.stopImmediatePropagation(); undoDraftAction(); return
+      }
+      if (draft.length && ['Backspace', 'Delete'].includes(event.key)) {
+        event.preventDefault(); event.stopImmediatePropagation(); undoDraftAction(); return
+      }
+      if (draft.length && cursor?.boundary && event.code === 'Space') {
+        event.preventDefault(); event.stopImmediatePropagation()
+        if (!event.repeat) {
+          const next = !routeToggle
+          setCursor((cursorState) => boundaryPreviewCursor(cursorState, next))
+          setRouteToggle(next)
+        }
+        return
+      }
+      if (cursor?.boundary && event.key === 'Shift') setCursor((current) => boundaryPreviewCursor(current, routeToggle, true))
+      if (event.key === 'Escape') {
+        setDraft([]); setDraftInsertions([]); setDraftActions([]); setRouteToggle(false)
+        setCursor((current) => current ? { ...current, chain: null, boundary: null } : current)
+      }
+      if (event.key === 'Enter' && ['polygon', 'semantic_segmentation', 'instance_segmentation'].includes(tool) && draft.length >= 3) confirmFinish(draft)
+    }
+    const keyUpHandler = (event) => {
+      if (cursor?.boundary && event.key === 'Shift') setCursor((current) => boundaryPreviewCursor(current, routeToggle, false))
+      if (cursor?.boundary && ['Control', 'Meta'].includes(event.key)) {
+        setCursor((current) => current ? { ...current, chain: null, boundary: null } : current)
+        setRouteToggle(false)
+      }
     }
     window.addEventListener('keydown', keyHandler)
-    return () => window.removeEventListener('keydown', keyHandler)
-  }, [draft, finish, tool])
+    window.addEventListener('keyup', keyUpHandler)
+    return () => {
+      window.removeEventListener('keydown', keyHandler)
+      window.removeEventListener('keyup', keyUpHandler)
+    }
+  }, [confirmFinish, cursor?.boundary, draft, draftActions, routeToggle, tool])
 
   const hitAnnotations = (point) => visibleAnnotations.filter((item) => {
     const points = annotationPoints(item)
@@ -150,18 +306,38 @@ export default function AnnotationCanvas({ image, imageUrl, annotations, labels,
     }
     if (!activeLabelId) return
     if (['rectangle', 'reid'].includes(tool)) {
-      if (draft.length === 1) finish([draft[0], point]); else setDraft([point])
+      if (draft.length === 1) finish([draft[0], point]); else addDraftAction([point])
     } else if (tool === 'ocr') {
-      const next = [...draft, point]; next.length === 4 ? finish(next) : setDraft(next)
+      const next = [...draft, point]; next.length === 4 ? finish(next) : addDraftAction([point])
     } else if (tool === 'rotated_rectangle') {
-      const next = [...draft, point]; next.length === 3 ? finish(rotatedPoints(next[0], next[1], next[2])) : setDraft(next)
-    } else if (['polygon', 'semantic_segmentation', 'instance_segmentation'].includes(tool)) setDraft((items) => [...items, point])
+      const next = [...draft, point]; next.length === 3 ? finish(rotatedPoints(next[0], next[1], next[2])) : addDraftAction([point])
+    } else if (tool === 'polygon') addDraftAction([point])
+    else if (isSegmentation(tool)) {
+      const snap = findTopologySnap(event)
+      const snappedPoint = snap?.kind === 'vertex'
+        ? snap.point
+        : { ...(snap?.point || point), vertexId: createId() }
+      const insertions = snap?.kind === 'edge' ? sharedEdgeInsertions(snap, snappedPoint) : []
+      const start = draft[draft.length - 1]
+      if ((event.ctrlKey || event.metaKey) && start?.vertexId && snap?.kind === 'vertex') {
+        const chain = selectBoundaryChain(start, snappedPoint, event, Boolean(event.shiftKey) !== routeToggle)
+        if (chain?.length) { addDraftAction(chain); return }
+      }
+      addDraftAction([snappedPoint], insertions)
+    }
   }
 
   const handlePointerMove = (event) => {
-    setCursor(screenToImage(event))
+    const rawPoint = screenToImage(event)
+    const snap = isSegmentation(tool) && (draft.length || event.shiftKey) ? findTopologySnap(event) : null
+    const start = draft[draft.length - 1]
+    const chain = (event.ctrlKey || event.metaKey) && start?.vertexId && snap?.kind === 'vertex'
+      ? selectBoundaryChain(start, snap.point, event, Boolean(event.shiftKey) !== routeToggle)
+      : null
+    const boundary = chain?.length ? { start, end: snap.point, clientX: event.clientX, clientY: event.clientY, shiftKey: event.shiftKey } : null
+    setCursor({ ...(snap?.point || rawPoint), snap: snap?.kind || null, chain, boundary })
     if (!interaction) return
-    const point = screenToImage(event)
+    const point = rawPoint
     if (interaction.type === 'pan') {
       const rect = svgRef.current.getBoundingClientRect()
       const dx = (event.clientX - interaction.clientX) * (image.width / rect.width) / view.zoom
@@ -173,11 +349,14 @@ export default function AnnotationCanvas({ image, imageUrl, annotations, labels,
     const dx = point.x - interaction.start.x, dy = point.y - interaction.start.y
     if (Math.abs(dx) + Math.abs(dy) > 0.5) setInteraction((current) => ({ ...current, moved: true }))
     const points = interaction.type === 'move' ? movePoints(interaction.item.points, dx, dy) : editVertex(interaction.item, interaction.vertexIndex, point)
-    setDragPreview({ id: interaction.item.id, points })
+    const changes = isSegmentation(interaction.item.type)
+      ? points.map((nextPoint) => ({ vertexId: nextPoint.vertexId, point: nextPoint }))
+      : []
+    setDragPreview({ id: interaction.item.id, points, changes })
   }
 
   const handlePointerUp = (event) => {
-    if (dragPreview && interaction?.moved) onUpdate(interaction.item.id, dragPreview.points)
+    if (dragPreview && interaction?.moved) onUpdate(interaction.item.id, dragPreview.points, dragPreview.changes)
     setInteraction(null)
     setDragPreview(null)
     try { svgRef.current.releasePointerCapture(event.pointerId) } catch { /* noop */ }
@@ -193,7 +372,12 @@ export default function AnnotationCanvas({ image, imageUrl, annotations, labels,
   }
 
   const viewBox = `${view.x} ${view.y} ${image.width / view.zoom} ${image.height / view.zoom}`
-  const renderedAnnotations = visibleAnnotations.map((item) => dragPreview?.id === item.id ? { ...item, points: dragPreview.points } : item)
+  const previewPositions = new Map((dragPreview?.changes || []).map(({ vertexId, point }) => [vertexId, point]))
+  const renderedAnnotations = visibleAnnotations.map((item) => {
+    if (dragPreview?.id === item.id) return { ...item, points: dragPreview.points }
+    if (!isSegmentation(item.type) || !previewPositions.size) return item
+    return { ...item, points: item.points.map((point) => previewPositions.has(point.vertexId) ? { ...point, ...previewPositions.get(point.vertexId) } : point) }
+  })
   let preview = draft
   let previewIsBox = false
   if (cursor && draft.length) {
@@ -202,20 +386,21 @@ export default function AnnotationCanvas({ image, imageUrl, annotations, labels,
       preview = annotationPoints({ type: 'rectangle', points: [draft[0], cursor] })
       previewIsBox = true
     }
-    else preview = [...draft, cursor]
+    else preview = cursor.chain?.length ? [...draft, ...cursor.chain] : [...draft, cursor]
   }
 
   return (
     <div className="canvas-wrap">
-      <svg ref={svgRef} className={interaction?.type === 'pan' ? 'panning' : ''} viewBox={viewBox} preserveAspectRatio="xMidYMid meet" onPointerDown={handlePointerDown} onPointerMove={handlePointerMove} onPointerUp={handlePointerUp} onPointerLeave={() => setCursor(null)} onContextMenu={(event) => event.preventDefault()} onWheel={handleWheel} onDoubleClick={() => ['polygon', 'semantic_segmentation', 'instance_segmentation'].includes(tool) && draft.length >= 3 && finish(draft)}>
+      <svg ref={svgRef} className={interaction?.type === 'pan' ? 'panning' : ''} viewBox={viewBox} preserveAspectRatio="xMidYMid meet" onPointerDown={handlePointerDown} onPointerMove={handlePointerMove} onPointerUp={handlePointerUp} onPointerLeave={() => { setCursor(null); setRouteToggle(false) }} onContextMenu={(event) => event.preventDefault()} onWheel={handleWheel} onDoubleClick={() => ['polygon', 'semantic_segmentation', 'instance_segmentation'].includes(tool) && draft.length >= 3 && confirmFinish(draft)}>
         {image.mediaType === 'video' ? <foreignObject x="0" y="0" width={image.width || 1280} height={image.height || 720} style={{ pointerEvents: 'none' }}><video ref={videoRef} src={imageUrl} style={{ width: '100%', height: '100%', objectFit: 'contain' }} onLoadedMetadata={(event) => onVideoMetadata?.({ width: event.currentTarget.videoWidth, height: event.currentTarget.videoHeight })} onTimeUpdate={(event) => onFrameChange?.(nearestTimelineFrame(frameTimeline, event.currentTarget.currentTime))} /></foreignObject> : <image href={imageUrl} x="0" y="0" width={image.width} height={image.height} />}
         {renderedAnnotations.map((item) => <Shape key={item.id} item={item} color={labels.find((label) => label.id === item.labelId)?.color || '#fff'} selected={item.id === selectedId} zoom={view.zoom} readOnlyGeometry={readOnlyGeometry} />)}
         {overlayPoints.map((point, index) => <g key={`${point.mmsi}-${index}`} pointerEvents="none"><circle cx={point.x} cy={point.y} r={7 / view.zoom} fill="#22d3ee" stroke="#fff" strokeWidth={2 / view.zoom} vectorEffect="non-scaling-stroke" /><line x1={point.x - 12 / view.zoom} y1={point.y} x2={point.x + 12 / view.zoom} y2={point.y} stroke="#22d3ee" strokeWidth={2 / view.zoom} vectorEffect="non-scaling-stroke" /><line x1={point.x} y1={point.y - 12 / view.zoom} x2={point.x} y2={point.y + 12 / view.zoom} stroke="#22d3ee" strokeWidth={2 / view.zoom} vectorEffect="non-scaling-stroke" /><text x={point.x + 11 / view.zoom} y={point.y - 11 / view.zoom} fill="#fff" stroke="#08111f" strokeWidth={3 / view.zoom} paintOrder="stroke" fontSize={14 / view.zoom} fontWeight="700">{point.mmsi}</text></g>)}
-        {preview.length > 0 && (previewIsBox ? <polygon className="draft-shape" points={preview.map((p) => `${p.x},${p.y}`).join(' ')} strokeWidth={2 / view.zoom} vectorEffect="non-scaling-stroke" /> : <polyline className="draft-shape" points={preview.map((p) => `${p.x},${p.y}`).join(' ')} strokeWidth={2 / view.zoom} vectorEffect="non-scaling-stroke" />)}
+        {preview.length > 0 && (previewIsBox ? <polygon className="draft-shape" points={preview.map((p) => `${p.x},${p.y}`).join(' ')} strokeWidth={2 / view.zoom} vectorEffect="non-scaling-stroke" /> : <polyline className={`draft-shape ${cursor?.chain?.length ? 'boundary-chain-preview' : ''}`} points={preview.map((p) => `${p.x},${p.y}`).join(' ')} strokeWidth={2 / view.zoom} vectorEffect="non-scaling-stroke" />)}
         {draft.map((point, index) => <circle key={index} cx={point.x} cy={point.y} r={5 / view.zoom} className="vertex draft" />)}
+        {cursor?.snap && <circle cx={cursor.x} cy={cursor.y} r={7 / view.zoom} className={`snap-indicator ${cursor.snap}`} strokeWidth={2 / view.zoom} />}
       </svg>
       <div className="zoom-indicator">{Math.round(view.zoom * 100)}%</div>
-      {draft.length > 0 && <div className="drawing-hint">{['polygon', 'semantic_segmentation', 'instance_segmentation'].includes(tool) ? '點擊新增頂點，Enter／雙擊完成，Esc 取消' : tool === 'rotated_rectangle' ? `${draft.length}/3 點` : tool === 'ocr' ? `${draft.length}/4 點` : `${draft.length}/2 點`}</div>}
+      {draft.length > 0 && <div className="drawing-hint">{isSegmentation(tool) ? 'Ctrl 預覽沿用邊界，Space 切換路徑，Ctrl 點擊套用，Ctrl+Z 復原草稿' : tool === 'polygon' ? '點擊新增頂點，Enter／雙擊完成，Esc 取消' : tool === 'rotated_rectangle' ? `${draft.length}/3 點` : tool === 'ocr' ? `${draft.length}/4 點` : `${draft.length}/2 點`}</div>}
       {image.mediaType === 'video' && <div className="video-controls"><button onClick={() => { const video = videoRef.current; const timelineIndex = frameTimeline.findIndex((item) => item.frame_index === currentFrame); if (timelineIndex >= 0) video.currentTime = frameTimeline[Math.max(0, timelineIndex - 1)].video_pts_s; else video.currentTime = Math.max(0, video.currentTime - 1 / 30) }}>◀格</button><button onClick={() => videoRef.current?.paused ? videoRef.current.play() : videoRef.current.pause()}>播放／暫停</button><button onClick={() => { const video = videoRef.current; const timelineIndex = frameTimeline.findIndex((item) => item.frame_index === currentFrame); if (timelineIndex >= 0) video.currentTime = frameTimeline[Math.min(frameTimeline.length - 1, timelineIndex + 1)].video_pts_s; else video.currentTime += 1 / 30 }}>格▶</button><span>Frame {currentFrame}</span><input type="range" min="0" max={frameTimeline.length ? frameTimeline.length - 1 : Math.max(1, Math.round((videoRef.current?.duration || 0) * 30))} value={frameTimeline.length ? Math.max(0, frameTimeline.findIndex((item) => item.frame_index === currentFrame)) : currentFrame} onChange={(event) => { const value = Number(event.target.value); const timelineItem = frameTimeline[value]; const frame = timelineItem?.frame_index ?? value; videoRef.current.currentTime = timelineItem?.video_pts_s ?? frame / 30; onFrameChange?.(frame) }} /></div>}
     </div>
   )
@@ -224,5 +409,6 @@ export default function AnnotationCanvas({ image, imageUrl, annotations, labels,
 function Shape({ item, color, selected, zoom, readOnlyGeometry }) {
   const common = { fill: color, fillOpacity: selected ? 0.24 : 0.12, stroke: color, strokeWidth: (selected ? 3 : 2) / zoom, vectorEffect: 'non-scaling-stroke', className: selected ? 'annotation-shape selected' : 'annotation-shape' }
   const points = annotationPoints(item)
-  return <g>{['rectangle', 'reid'].includes(item.type) ? <rect x={Math.min(item.points[0].x, item.points[1].x)} y={Math.min(item.points[0].y, item.points[1].y)} width={Math.abs(item.points[1].x - item.points[0].x)} height={Math.abs(item.points[1].y - item.points[0].y)} {...common} /> : <polygon points={points.map((p) => `${p.x},${p.y}`).join(' ')} {...common} />}{selected && !readOnlyGeometry && points.map((point, index) => <circle key={index} cx={point.x} cy={point.y} r={4 / zoom} fill="#fff" stroke={color} strokeWidth={2 / zoom} />)}</g>
+  const showVertices = !readOnlyGeometry && (selected || isSegmentation(item.type))
+  return <g>{['rectangle', 'reid'].includes(item.type) ? <rect x={Math.min(item.points[0].x, item.points[1].x)} y={Math.min(item.points[0].y, item.points[1].y)} width={Math.abs(item.points[1].x - item.points[0].x)} height={Math.abs(item.points[1].y - item.points[0].y)} {...common} /> : <polygon points={points.map((p) => `${p.x},${p.y}`).join(' ')} {...common} />}{showVertices && points.map((point, index) => <circle key={index} cx={point.x} cy={point.y} r={4 / zoom} fill="#fff" stroke={color} strokeWidth={2 / zoom} />)}</g>
 }
