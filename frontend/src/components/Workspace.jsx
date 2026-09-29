@@ -4,6 +4,7 @@ import { api } from '../api'
 import AnnotationCanvas from './AnnotationCanvas'
 import { createId } from '../uuid'
 import { hydrateSegmentationTopology, insertSharedVertices, updateSharedVertices } from '../segmentationTopology'
+import { discoverImageBboxSets, matchBboxRowsToRecords, mediaFilesFromSelection, parseImageBboxRows, selectionPath } from '../reidBboxImport'
 
 const TOOL_NAMES = {
   rectangle: '矩形', polygon: '多邊形', ocr: 'OCR 四邊形', rotated_rectangle: '三點旋轉矩形',
@@ -80,6 +81,7 @@ const regenerateReidAnnotations = (annotations) => {
 }
 
 const annotationsAtFrame = (annotations, frame) => annotations.filter((item) => item.frame_id === frame)
+const mediaDisplayPath = (item) => String(item.relativePath || item.originalFilename || item.filename || '').replaceAll('\\', '/')
 
 export default function Workspace({ project: initialProject, isAdmin, onExit }) {
   const [project, setProject] = useState(initialProject)
@@ -116,6 +118,7 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
   const [uploading, setUploading] = useState(false)
   const [downloading, setDownloading] = useState(false)
   const [uploadProgress, setUploadProgress] = useState({ current: 0, total: 0 })
+  const [uploadStage, setUploadStage] = useState('media')
 
   const saveTimer = useRef(null)
   const draftActiveRef = useRef(false)
@@ -131,12 +134,7 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
   const loadImages = useCallback(async () => {
     try {
       const list = await api.listImages(project.id)
-      // 依原始檔名（或 filename）進行自然數字排序
-      const sorted = [...list].sort((a, b) => {
-        const nameA = a.originalFilename || a.filename || ''
-        const nameB = b.originalFilename || b.filename || ''
-        return nameA.localeCompare(nameB, undefined, { numeric: true, sensitivity: 'base' })
-      })
+      const sorted = [...list].sort((a, b) => mediaDisplayPath(a).localeCompare(mediaDisplayPath(b), undefined, { numeric: true, sensitivity: 'base' }))
       setImages(sorted)
     } catch (err) {
       setError(err.message)
@@ -278,19 +276,96 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
     if (selected?.type === 'ocr') setTimeout(() => ocrInputRef.current?.focus(), 0)
   }, [selectedId, selected?.type])
 
-  // 👇 修改：加入進度回報邏輯
+  const importImageBboxSets = async (bboxSets, uploadedRecords) => {
+    if (!bboxSets.length) return
+    setImportingBboxes(true)
+    try {
+      const assignments = []
+      for (const bboxSet of bboxSets) {
+        const selectedPaths = new Set(bboxSet.imageFiles.map(selectionPath))
+        const records = uploadedRecords.filter((record) => selectedPaths.has(selectionPath({ name: record.relativePath || record.originalFilename || record.filename })))
+        const rows = await parseImageBboxRows(bboxSet.bboxFile)
+        const matched = matchBboxRowsToRecords(rows, records)
+        if (!matched.length) throw new Error(`${bboxSet.bboxFile.name} 找不到可依檔名配對的圖片資料`)
+        assignments.push(...matched.map((item) => ({ ...item, bboxFile: bboxSet.bboxFile })))
+      }
+
+      const validDetection = (detection) => {
+        if (detection.bbox_format && detection.bbox_format !== 'xywh_top_left') return false
+        if (!Array.isArray(detection.bbox_xywh) || detection.bbox_xywh.length !== 4) return false
+        const values = detection.bbox_xywh.map(Number)
+        return values.every(Number.isFinite) && values[2] > 0 && values[3] > 0
+      }
+      const classNames = [...new Set(assignments.flatMap(({ row }) => row.detections.filter(validDetection).map((detection) => String(detection.class ?? '').trim() || '未分類')))]
+      if (!classNames.length) throw new Error('JSONL 中找不到有效的 xywh_top_left bbox')
+
+      const labels = [...project.labels]
+      const usedIds = new Set(labels.map((label) => label.id))
+      const labelIdByClass = new Map()
+      classNames.forEach((name, classIndex) => {
+        const existing = labels.find((label) => label.name.trim().toLocaleLowerCase() === name.toLocaleLowerCase())
+        if (existing) { labelIdByClass.set(name, existing.id); return }
+        const baseId = classLabelId(name, classIndex)
+        let id = baseId, suffix = 2
+        while (usedIds.has(id)) id = `${baseId}-${suffix++}`
+        usedIds.add(id)
+        labels.push({ id, name, color: classColor(classIndex, classNames.length), attributes: [] })
+        labelIdByClass.set(name, id)
+      })
+      const updatedProject = await api.updateProject(project.id, { labels })
+      setProject(updatedProject)
+      setActiveLabelId(labelIdByClass.get(classNames[0]) || '')
+
+      const now = new Date().toISOString()
+      const documents = assignments.map(({ record, row, bboxFile }) => {
+        const sourceWidth = Number(row.source_width ?? row.image_width) || record.width || 1
+        const sourceHeight = Number(row.source_height ?? row.image_height) || record.height || 1
+        const scaleX = (record.width || sourceWidth) / sourceWidth
+        const scaleY = (record.height || sourceHeight) / sourceHeight
+        const annotations = row.detections.flatMap((detection, detectionIndex) => {
+          if (!validDetection(detection)) return []
+          const [x, y, width, height] = detection.bbox_xywh.map(Number)
+          const detectionClass = String(detection.class ?? '').trim() || '未分類'
+          return [{
+            id: createId(), type: 'reid', labelId: labelIdByClass.get(detectionClass),
+            points: [{ x: x * scaleX, y: y * scaleY }, { x: (x + width) * scaleX, y: (y + height) * scaleY }],
+            attributes: {}, identity_id: '', track_id: null, camera_id: null, video_id: null, frame_id: null,
+            hidden: false, locked: false, keyframe: false, generated: false, created_at: now,
+            source_class: detection.class ?? null, confidence: detection.confidence ?? null, source_detection_index: detectionIndex,
+          }]
+        })
+        return { imageId: record.id, document: {
+          annotations,
+          classifications: [], completed: false, revision: 0,
+          editor_state: { reid_edit_only: true, bbox_source_name: bboxFile.name },
+        } }
+      })
+      setUploadStage('bbox')
+      setUploadProgress({ current: 0, total: documents.length })
+      await api.saveAnnotationsBulk(project.id, documents, (current, total) => setUploadProgress({ current, total }))
+    } finally {
+      setImportingBboxes(false)
+    }
+  }
+
   const upload = async (files) => {
     if (!files?.length) return
+    const selectedFiles = Array.from(files)
+    const mediaFiles = mediaFilesFromSelection(selectedFiles)
+    const bboxSets = editingProject && tool === 'reid' ? discoverImageBboxSets(selectedFiles) : []
+    if (!mediaFiles.length) { setError('選取範圍內沒有可載入的圖片或影片'); return }
     setUploading(true)
-    setUploadProgress({ current: 0, total: files.length })
+    setUploadStage('media')
+    setUploadProgress({ current: 0, total: mediaFiles.length })
     try { 
-      // 這裡傳入 callback 給 api.js 接收進度
-      await api.uploadImages(project.id, files, (current, total) => {
+      const uploadedRecords = await api.uploadImages(project.id, mediaFiles, (current, total) => {
         setUploadProgress({ current, total })
       })
+      await importImageBboxSets(bboxSets, uploadedRecords)
       await loadImages() 
     } catch (err) { 
       setError(err.message) 
+      await loadImages()
     } finally {
       setUploading(false)
     }
@@ -559,7 +634,7 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
 
   return (
     <main className="workspace-shell">
-      <input ref={fileInputRef} className="hidden-file-input" type="file" multiple accept={editingProject ? 'video/*' : (project.primaryMode === 'reid' ? 'image/*,video/*' : 'image/*')} onChange={handleUpload} />
+      <input ref={fileInputRef} className="hidden-file-input" type="file" multiple accept={editingProject ? 'image/*,video/*,.jsonl' : (project.primaryMode === 'reid' ? 'image/*,video/*' : 'image/*')} onChange={handleUpload} />
       <input ref={folderInputRef} className="hidden-file-input" type="file" multiple webkitdirectory="" directory="" onChange={handleUpload} />
       {isAdmin && <input ref={bboxInputRef} className="hidden-file-input" type="file" accept=".jsonl,application/json,text/plain" onChange={handleBboxJsonl} />}
       {isAdmin && <input ref={aisInputRef} className="hidden-file-input" type="file" accept=".jsonl,application/json,text/plain" onChange={handleAisJsonl} />}
@@ -567,17 +642,17 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
       {uploading && (
         <div style={{ position: 'absolute', inset: 0, zIndex: 9999, backgroundColor: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
           <div style={{ background: 'var(--panel-bg, #fff)', color: 'var(--text-primary, #000)', padding: '24px', borderRadius: '12px', width: '320px', boxShadow: '0 4px 20px rgba(0,0,0,0.2)' }}>
-            <h3 style={{ margin: '0 0 12px 0', fontSize: '16px' }}>圖片載入中...</h3>
-            {uploadProgress.total > 0 ? <><div style={{ fontSize: '14px', marginBottom: '12px' }}>已複製：{uploadProgress.current} / {uploadProgress.total} 個檔案</div><progress value={uploadProgress.current} max={uploadProgress.total} style={{ width: '100%', height: '8px' }} /></> : <div style={{ fontSize: '14px' }}>請在 Windows 視窗中選擇圖片或資料夾</div>}
+            <h3 style={{ margin: '0 0 12px 0', fontSize: '16px' }}>{uploadStage === 'bbox' ? 'bbox 匯入中…' : '圖片載入中…'}</h3>
+            {uploadProgress.total > 0 ? <><div style={{ fontSize: '14px', marginBottom: '12px' }}>{uploadStage === 'bbox' ? '已匯入' : '已複製'}：{uploadProgress.current} / {uploadProgress.total} 個檔案</div><progress value={uploadProgress.current} max={uploadProgress.total} style={{ width: '100%', height: '8px' }} /></> : <div style={{ fontSize: '14px' }}>請在 Windows 視窗中選擇圖片或資料夾</div>}
           </div>
         </div>
       )}
 
       <header className="workspace-header">
-        <div className="workspace-brand"><button className="icon-button" onClick={(event) => { event.stopPropagation(); onExit() }}><ArrowLeft size={19} /></button><div><strong>{project.name}</strong><span>{currentImage ? `${index + 1} / ${images.length} · ${currentImage.filename}` : '尚未載入圖片'}</span></div></div>
+        <div className="workspace-brand"><button className="icon-button" onClick={(event) => { event.stopPropagation(); onExit() }}><ArrowLeft size={19} /></button><div><strong>{project.name}</strong><span>{currentImage ? `${index + 1} / ${images.length} · ${mediaDisplayPath(currentImage)}` : '尚未載入圖片'}</span></div></div>
         <div className="workspace-actions">
           <select className="progress-filter" value={progressFilter} onChange={(event) => { setProgressFilter(event.target.value); setIndex(0) }}><option value="all">全部資料</option><option value="pending">未完成</option><option value="completed">已完成</option></select>
-          {filteredImages.length > 0 && <label className="image-jump"><span>跳轉資料</span><select value={Math.max(0, filteredImages.findIndex((item) => item.id === currentImage?.id))} onChange={(event) => setIndex(Number(event.target.value))}>{filteredImages.map((item, imageIndex) => <option key={item.id} value={imageIndex}>{imageIndex + 1}. {item.originalFilename || item.filename}</option>)}</select></label>}
+          {filteredImages.length > 0 && <label className="image-jump"><span>跳轉資料</span><select value={Math.max(0, filteredImages.findIndex((item) => item.id === currentImage?.id))} onChange={(event) => setIndex(Number(event.target.value))}>{filteredImages.map((item, imageIndex) => <option key={item.id} value={imageIndex}>{imageIndex + 1}. {mediaDisplayPath(item)}</option>)}</select></label>}
           <button className="secondary-button compact" onClick={toggleCompleted} disabled={!currentImage}>{document.completed ? '取消完成' : '標記完成'}</button>
           {isAdmin && <button className="secondary-button compact" onClick={() => fileInputRef.current?.click()} disabled={uploading}><ImagePlus size={16} />新增檔案</button>}
           {isAdmin && <button className="secondary-button compact" onClick={() => folderInputRef.current?.click()} disabled={uploading}><FolderOpen size={16} />選擇資料夾</button>}
@@ -602,7 +677,7 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
         </aside>
         <section className="canvas-column">
           <div className="mode-banner on">{reidEditOnly ? `ReID 純修改模式 · bbox 已鎖定 · 可修改屬性與 ID${document.editor_state?.bbox_source_name ? ` · ${document.editor_state.bbox_source_name}` : ''}` : tool === 'classification' ? '圖片分類模式 · 於右側選擇圖片層級 label · 右鍵拖曳視角' : '整合模式 · 左鍵標註／編輯 · 右鍵拖曳視角'}</div>
-          {!currentImage ? (progressFilter === 'all' ? <div className="upload-empty"><ImagePlus size={46} /><strong>{isAdmin ? '載入圖片／影片資料集' : '專案目前沒有可標註資料'}</strong><span>{isAdmin ? '可選擇多個檔案或整個資料夾；檔案會複製至專案資料夾' : '請聯絡管理員加入圖片或影片'}</span>{isAdmin && <div className="upload-actions"><button className="primary-button" onClick={() => fileInputRef.current?.click()} disabled={uploading}><ImagePlus size={16} />選擇檔案</button><button className="secondary-button" onClick={() => folderInputRef.current?.click()} disabled={uploading}><FolderOpen size={16} />選擇資料夾</button></div>}</div> : <div className="upload-empty"><strong>此分群沒有檔案</strong><span>{progressFilter === 'completed' ? '目前沒有已完成的資料' : '目前沒有未完成的資料'}</span></div>) : <AnnotationCanvas key={currentImage.id} image={currentImage} imageUrl={api.imageUrl(project.id, currentImage.id)} annotations={visibleAnnotations} labels={project.labels} activeLabelId={tool === 'ocr' ? 'ocr-text' : activeLabelId} tool={tool} selectedId={selectedId} onSelect={setSelectedId} onCommit={reidEditOnly ? () => {} : handleCanvasCommit} onUpdate={reidEditOnly ? () => {} : handleCanvasUpdate} onDraftActiveChange={handleDraftActiveChange} resetToken={resetToken} currentFrame={currentFrame} onFrameChange={(frame) => { setCurrentFrame(frame); setSelectedId(null) }} readOnlyGeometry={reidEditOnly} frameTimeline={frameTimeline} onVideoMetadata={setVideoMetadata} overlayPoints={aisOverlayPoints} />}
+          {!currentImage ? (progressFilter === 'all' ? <div className="upload-empty"><ImagePlus size={46} /><strong>{isAdmin ? '載入圖片／影片資料集' : '專案目前沒有可標註資料'}</strong><span>{isAdmin ? (editingProject ? '可直接選擇最外層日期資料夾；工具會遞迴載入圖片並自動套用各自的「資料夾名_bbox.jsonl」' : '可選擇多個檔案或整個資料夾；檔案會複製至專案資料夾') : '請聯絡管理員加入圖片或影片'}</span>{isAdmin && <div className="upload-actions"><button className="primary-button" onClick={() => fileInputRef.current?.click()} disabled={uploading}><ImagePlus size={16} />選擇檔案</button><button className="secondary-button" onClick={() => folderInputRef.current?.click()} disabled={uploading}><FolderOpen size={16} />選擇資料夾</button></div>}</div> : <div className="upload-empty"><strong>此分群沒有檔案</strong><span>{progressFilter === 'completed' ? '目前沒有已完成的資料' : '目前沒有未完成的資料'}</span></div>) : <AnnotationCanvas key={currentImage.id} image={currentImage} imageUrl={api.imageUrl(project.id, currentImage.id)} annotations={visibleAnnotations} labels={project.labels} activeLabelId={tool === 'ocr' ? 'ocr-text' : activeLabelId} tool={tool} selectedId={selectedId} onSelect={setSelectedId} onCommit={reidEditOnly ? () => {} : handleCanvasCommit} onUpdate={reidEditOnly ? () => {} : handleCanvasUpdate} onDraftActiveChange={handleDraftActiveChange} resetToken={resetToken} currentFrame={currentFrame} onFrameChange={(frame) => { setCurrentFrame(frame); setSelectedId(null) }} readOnlyGeometry={reidEditOnly} frameTimeline={frameTimeline} onVideoMetadata={setVideoMetadata} overlayPoints={aisOverlayPoints} />}
           <footer className="image-nav"><button onClick={() => navigate(-1)} disabled={index === 0}><ChevronLeft size={18} />上一張</button><div className="progress-track"><span style={{ width: images.length ? `${((index + 1) / images.length) * 100}%` : '0%' }} /></div><button onClick={() => navigate(1)} disabled={index >= images.length - 1}>下一張<ChevronRight size={18} /></button></footer>
         </section>
         <aside className="inspector-panel">

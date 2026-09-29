@@ -118,7 +118,8 @@ def normalize_project(config: dict, directory: Path) -> dict:
         config["schema_version"] = "1.0"
         changed = True
     config.setdefault("classificationMode", "multiple")
-    expected_media_type = "video" if config["projectType"] == "editing" else ("both" if config["primaryMode"] == "reid" else "image")
+    config["group"] = str(config.get("group") or "").strip()
+    expected_media_type = "both" if config["primaryMode"] == "reid" else "image"
     if config.get("mediaType") != expected_media_type:
         config["mediaType"] = expected_media_type
         changed = True
@@ -177,8 +178,6 @@ def project_allows_videos(project: dict) -> bool:
 
 
 def project_allowed_media(project: dict) -> set[str]:
-    if project.get("projectType") == "editing":
-        return ALLOWED_VIDEOS
     return ALLOWED_MEDIA if project_allows_videos(project) else ALLOWED_IMAGES
 
 
@@ -536,6 +535,7 @@ def create_project():
     if primary_mode not in SUPPORTED_MODES:
         return jsonify({"error": "請選擇有效的標註方式"}), 400
     classification_mode = body.get("classificationMode", "multiple")
+    group = str(body.get("group") or "").strip()
     if classification_mode not in {"single", "multiple"}:
         return jsonify({"error": "請選擇有效的圖片分類模式"}), 400
     project_id = str(uuid.uuid4())
@@ -576,7 +576,8 @@ def create_project():
         "primaryMode": primary_mode,
         "labels": labels,
         "classificationMode": classification_mode,
-        "mediaType": "video" if project_type == "editing" else ("both" if primary_mode == "reid" else "image"),
+        "group": group,
+        "mediaType": "both" if primary_mode == "reid" else "image",
         "createdAt": now,
         "updatedAt": now,
         "imageCount": 0,
@@ -666,9 +667,10 @@ def update_project(project_id: str):
         if conflict:
             return jsonify({"error": conflict}), 400
         remove_deleted_empty_attributes(directory, existing.get("labels", []), body["labels"])
-    for field in ("name", "projectType", "primaryMode", "labels", "classificationMode", "mediaType"):
+    for field in ("name", "projectType", "primaryMode", "labels", "classificationMode", "mediaType", "group"):
         if field in body:
             existing[field] = body[field]
+    existing["group"] = str(existing.get("group") or "").strip()
     if existing.get("projectType") not in SUPPORTED_PROJECT_TYPES:
         return jsonify({"error": "請選擇有效的專案類型"}), 400
     if existing["projectType"] == "editing":
@@ -698,7 +700,7 @@ def list_images(project_id: str):
 def select_image_files(project_id: str):
     try:
         project = load_project(project_id)
-        paths = run_windows_picker("files", project_allows_videos(project), project.get("projectType") == "editing")
+        paths = run_windows_picker("files", project_allows_videos(project))
         return jsonify({"paths": [str(path.resolve()) for path in paths], "root": None})
     except (RuntimeError, json.JSONDecodeError) as error:
         return jsonify({"error": str(error)}), 500
@@ -946,6 +948,55 @@ def save_annotation(project_id: str, image_id: str):
             payload["editor_state"] = stored["editor_state"]
     write_json_atomic(path, payload)
     return jsonify(payload)
+
+
+@app.put("/api/projects/<project_id>/annotations/bulk")
+def save_annotations_bulk(project_id: str):
+    directory = project_dir(project_id)
+    project = load_project(project_id)
+    if project.get("primaryMode") != "reid":
+        return jsonify({"error": "批次 bbox 匯入僅支援 ReID 專案"}), 400
+    items = request.get_json(force=True).get("items", [])
+    if not isinstance(items, list):
+        return jsonify({"error": "items 必須是陣列"}), 400
+    records = {item["id"]: item for item in list_image_records(directory)}
+    valid_ids = {label["id"] for label in project.get("labels", [])}
+    can_manage_sources = app.config.get("AUTH_DISABLED_FOR_TESTS") is True or bool(getattr(g, "current_user", {}).get("is_admin"))
+    saved = 0
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        image_id = str(item.get("image_id", ""))
+        record = records.get(image_id)
+        if not record:
+            continue
+        body = item.get("document") if isinstance(item.get("document"), dict) else {}
+        path = directory / "annotations" / f"{image_id}.json"
+        stored = read_json(path, {})
+        payload = {
+            "schema_version": "1.0",
+            "media": {
+                "id": image_id,
+                "type": record.get("mediaType", "image"),
+                "file_name": record.get("originalFilename") or record.get("filename", ""),
+                "width": int(record.get("width", 0)),
+                "height": int(record.get("height", 0)),
+                "source_path": record.get("sourcePath") or str((directory / record.get("projectRelativePath", "")).resolve()),
+            },
+            "annotations": normalized_annotations(body.get("annotations", []), "reid", valid_ids),
+            "classifications": [],
+            "completed": bool(body.get("completed", False)),
+            "revision": int(body.get("revision", 0)) + 1,
+            "updatedAt": utc_now(),
+        }
+        requested_editor_state = body.get("editor_state")
+        if can_manage_sources and isinstance(requested_editor_state, dict):
+            payload["editor_state"] = requested_editor_state
+        elif isinstance(stored.get("editor_state"), dict):
+            payload["editor_state"] = stored["editor_state"]
+        write_json_atomic(path, payload)
+        saved += 1
+    return jsonify({"saved": saved})
 
 
 @app.get("/api/projects/<project_id>/download")

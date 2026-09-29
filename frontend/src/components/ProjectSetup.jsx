@@ -13,8 +13,9 @@ const blankLabel = (index = 0) => ({
 
 const readableLabelId = (name, index) => name.trim().toLocaleLowerCase().replace(/[^\p{L}\p{N}_-]+/gu, '-').replace(/^[-_]+|[-_]+$/g, '') || `label-${index + 1}`
 
-export default function ProjectSetup({ onCancel, onCreated }) {
+export default function ProjectSetup({ onCancel, onCreated, existingGroups = [], initialGroup = '' }) {
   const [name, setName] = useState('')
+  const [group, setGroup] = useState(initialGroup)
   const [projectType, setProjectType] = useState('annotation')
   const [primaryMode, setPrimaryMode] = useState('rectangle')
   const [labels, setLabels] = useState([blankLabel()])
@@ -41,7 +42,7 @@ export default function ProjectSetup({ onCancel, onCreated }) {
         id: 'ocr-text', name: '文字', color: '#22d3ee', system: true,
         attributes: [{ id: 'transcription', name: '辨識文字', type: 'text', system: true }],
       }, ...cleanLabels]
-      onCreated(await api.createProject({ name: name.trim(), projectType, primaryMode: selectedMode, labels: cleanLabels, ...(selectedMode === 'classification' ? { classificationMode } : {}), mediaType: projectType === 'editing' ? 'video' : (selectedMode === 'reid' ? 'both' : 'image') }))
+      onCreated(await api.createProject({ name: name.trim(), group: group.trim(), projectType, primaryMode: selectedMode, labels: cleanLabels, ...(selectedMode === 'classification' ? { classificationMode } : {}), mediaType: selectedMode === 'reid' ? 'both' : 'image' }))
     } catch (err) { setError(err.message) }
   }
 
@@ -52,13 +53,14 @@ export default function ProjectSetup({ onCancel, onCreated }) {
       {error && <div className="error-banner">{error}</div>}
       <section className="setup-section">
         <label className="field"><span>專案名稱</span><input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="例如：街景物件資料集" /></label>
+        <label className="field"><span>專案群組（選填）</span><input list="project-group-options" value={group} onChange={(e) => setGroup(e.target.value)} placeholder="選擇既有群組或輸入新群組名稱" /><datalist id="project-group-options">{existingGroups.map((item) => <option key={item} value={item} />)}</datalist><small>指定後，專案只會顯示在該群組資料夾內。</small></label>
         <div className="field"><span>專案類型（單選）</span><div className="option-grid"><button className={`option-card ${projectType === 'annotation' ? 'selected' : ''}`} onClick={() => setProjectType('annotation')}>{projectType === 'annotation' && <Check size={17} />}標註專案</button><button className={`option-card ${projectType === 'editing' ? 'selected' : ''}`} onClick={() => setProjectType('editing')}>{projectType === 'editing' && <Check size={17} />}純修改專案</button></div></div>
         {projectType === 'annotation' ? <div className="field"><span>主要標註方式（單選）</span><div className="option-grid primary-modes">{MODE_OPTIONS.map((mode) => {
           const selected = primaryMode === mode
           return <button key={mode} className={`option-card ${selected ? 'selected' : ''}`} onClick={() => setPrimaryMode(mode)}>{selected && <Check size={17} />}{modeName(mode)}</button>
         })}</div></div> : <div className="field"><span>純修改方式</span><small>ReID bbox JSONL 純修改；不可新增、移動、縮放或刪除標註框。</small></div>}
         {selectedMode === 'classification' && <label className="field"><span>圖片分類模式</span><select value={classificationMode} onChange={(e) => setClassificationMode(e.target.value)}><option value="single">單一分類</option><option value="multiple">多標籤分類</option></select></label>}
-        {selectedMode === 'reid' && <div className="field"><span>ReID 資料來源</span><small>{projectType === 'editing' ? '純修改專案只可載入影片。' : '可載入圖片或影片。'}</small></div>}
+        {selectedMode === 'reid' && <div className="field"><span>ReID 資料來源</span><small>可載入圖片或影片。</small></div>}
       </section>
       {labelsRequired && <section className="setup-section">
         <div className="section-title"><div><span className="step-mark">02</span><h2>Labels</h2></div><button className="secondary-button" onClick={() => setLabels([...labels, blankLabel(labels.length)])}><Plus size={16} />新增 label</button></div>

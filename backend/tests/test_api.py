@@ -232,6 +232,16 @@ class ApiTestCase(unittest.TestCase):
                 self.assertEqual(response.get_json()["primaryMode"], mode)
                 self.assertEqual(response.get_json()["projectType"], "annotation")
 
+    def test_project_can_be_created_in_a_group(self):
+        response = self.client.post("/api/projects", json={
+            "name": "camera one", "group": "September data", "primaryMode": "rectangle", "labels": [],
+        })
+        self.assertEqual(response.status_code, 201)
+        project = response.get_json()
+        self.assertEqual(project["group"], "September data")
+        listed = self.client.get("/api/projects").get_json()
+        self.assertEqual(listed[0]["group"], "September data")
+
     def test_editing_project_is_always_reid(self):
         response = self.client.post("/api/projects", json={
             "name": "pure editing", "projectType": "editing", "primaryMode": "rectangle",
@@ -241,15 +251,25 @@ class ApiTestCase(unittest.TestCase):
         project = response.get_json()
         self.assertEqual(project["projectType"], "editing")
         self.assertEqual(project["primaryMode"], "reid")
-        self.assertEqual(project["mediaType"], "video")
+        self.assertEqual(project["mediaType"], "both")
         self.assertEqual(project["labels"], [])
-        rejected = self.client.post(
+        accepted = self.client.post(
             f"/api/projects/{project['id']}/images",
             data={"files": (io.BytesIO(b"not-an-image"), "photo.jpg")},
             content_type="multipart/form-data",
         )
-        self.assertEqual(rejected.status_code, 201)
-        self.assertEqual(rejected.get_json(), [])
+        self.assertEqual(accepted.status_code, 201)
+        self.assertEqual(accepted.get_json()[0]["mediaType"], "image")
+
+        image = accepted.get_json()[0]
+        bulk = self.client.put(f"/api/projects/{project['id']}/annotations/bulk", json={"items": [{
+            "image_id": image["id"],
+            "document": {"annotations": [], "editor_state": {"reid_edit_only": True, "bbox_source_name": "pure editing_bbox.jsonl"}},
+        }]})
+        self.assertEqual(bulk.status_code, 200)
+        self.assertEqual(bulk.get_json()["saved"], 1)
+        stored = self.client.get(f"/api/projects/{project['id']}/images/{image['id']}/annotation").get_json()
+        self.assertEqual(stored["editor_state"]["bbox_source_name"], "pure editing_bbox.jsonl")
 
     def test_only_reid_accepts_video_input(self):
         reid = self.client.post("/api/projects", json={"name": "reid video", "primaryMode": "reid", "labels": [{"id": "person", "name": "person", "color": "#ff0000"}]}).get_json()

@@ -123,17 +123,18 @@ export const api = {
     const batchSize = 100 // 每批 100 張
     const totalFiles = fileArray.length
     let uploadedCount = 0
-    let lastResult = null
+    const uploaded = []
 
     for (let i = 0; i < totalFiles; i += batchSize) {
       const chunk = fileArray.slice(i, i + batchSize)
       const body = new FormData()
       chunk.forEach((file) => body.append('files', file, file.webkitRelativePath || file.name))
 
-      lastResult = await request(`/api/projects/${id}/images`, {
+      const result = await request(`/api/projects/${id}/images`, {
         method: 'POST',
         body,
       })
+      uploaded.push(...result)
 
       uploadedCount += chunk.length
       
@@ -143,11 +144,23 @@ export const api = {
       }
     }
 
-    return lastResult
+    return uploaded
   },
   getAnnotation: async (projectId, imageId) => toEditorDocument(await request(`/api/projects/${projectId}/images/${imageId}/annotation`)),
   saveAnnotation: async (projectId, imageId, data) => toEditorDocument(await request(`/api/projects/${projectId}/images/${imageId}/annotation`, {
     method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(toStoredDocument(data)),
   })),
+  saveAnnotationsBulk: async (projectId, items, onProgress) => {
+    const batchSize = 50
+    let saved = 0
+    for (let index = 0; index < items.length; index += batchSize) {
+      const batch = items.slice(index, index + batchSize).map(({ imageId, document }) => ({ image_id: imageId, document: toStoredDocument(document) }))
+      await request(`/api/projects/${projectId}/annotations/bulk`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ items: batch }),
+      })
+      saved += batch.length
+      onProgress?.(saved, items.length)
+    }
+  },
   imageUrl: (projectId, imageId) => `/api/projects/${projectId}/images/${imageId}/content`,
 }
