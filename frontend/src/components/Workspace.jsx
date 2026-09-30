@@ -121,6 +121,7 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
   const [uploadStage, setUploadStage] = useState('media')
 
   const saveTimer = useRef(null)
+  const annotationCacheRef = useRef(new Map())
   const draftActiveRef = useRef(false)
   const finishInProgress = useRef(false)
   const ocrInputRef = useRef(null)
@@ -131,11 +132,27 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
   const currentImage = filteredImages[index] || filteredImages[0]
   const nextImageToPreload = filteredImages[index + 1]
 
+  const fetchAnnotation = useCallback((imageId) => {
+    if (!annotationCacheRef.current.has(imageId)) {
+      const request = api.getAnnotation(project.id, imageId).catch((error) => {
+        annotationCacheRef.current.delete(imageId)
+        throw error
+      })
+      annotationCacheRef.current.set(imageId, request)
+    }
+    return annotationCacheRef.current.get(imageId)
+  }, [project.id])
+
+  useEffect(() => { annotationCacheRef.current.clear() }, [project.id])
+
   useEffect(() => {
-    if (!nextImageToPreload || nextImageToPreload.mediaType !== 'image') return
-    const preloader = new window.Image()
-    preloader.src = api.imageUrl(project.id, nextImageToPreload.id)
-  }, [nextImageToPreload?.id, nextImageToPreload?.mediaType, project.id])
+    if (!nextImageToPreload) return
+    if (nextImageToPreload.mediaType === 'image') {
+      const preloader = new window.Image()
+      preloader.src = api.imageUrl(project.id, nextImageToPreload.id)
+    }
+    fetchAnnotation(nextImageToPreload.id).catch(() => {})
+  }, [fetchAnnotation, nextImageToPreload?.id, nextImageToPreload?.mediaType, project.id])
 
   const loadImages = useCallback(async () => {
     try {
@@ -152,8 +169,11 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
     if (!currentImage) { setDocument({ annotations: [], classifications: [], revision: 0 }); return }
     let cancelled = false
     setVideoMetadata(null)
-    api.getAnnotation(project.id, currentImage.id).then((data) => {
+    setDocument({ annotations: [], classifications: [], revision: 0 })
+    setPast([]); setFuture([]); setSelectedId(null); setCurrentFrame(0); setAisRecords([]); setSelectedMmsi(''); setAisSourceName('')
+    fetchAnnotation(currentImage.id).then((data) => {
       if (cancelled) return
+      annotationCacheRef.current.delete(currentImage.id)
       const sourceAnnotations = project.primaryMode === 'reid' && currentImage.mediaType === 'video' ? regenerateReidAnnotations(data.annotations) : data.annotations
       const annotations = hydrateSegmentationTopology(sourceAnnotations)
       const materialized = { ...data, annotations }
@@ -167,7 +187,7 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
       }
     }).catch((err) => setError(err.message))
     return () => { cancelled = true }
-  }, [project.id, project.primaryMode, currentImage?.id, currentImage?.mediaType])
+  }, [fetchAnnotation, project.id, project.primaryMode, currentImage?.id, currentImage?.mediaType])
 
   const save = useCallback(async (payload = document) => {
     if (!currentImage) return null
