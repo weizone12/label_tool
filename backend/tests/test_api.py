@@ -47,6 +47,8 @@ class ApiTestCase(unittest.TestCase):
         self.assertEqual((image["width"], image["height"]), (320, 180))
         listed_image = self.client.get(f"/api/projects/{project_id}/images").get_json()[0]
         self.assertEqual(listed_image["originalFilename"], "sample.png")
+        cached = json.loads((Path(self.temp_dir.name) / "projects" / "測試專案" / "images.json").read_text(encoding="utf-8"))[image["id"]]
+        self.assertEqual((cached["width"], cached["height"], cached["mediaType"]), (320, 180, "image"))
 
         annotation = {
             "annotations": [{

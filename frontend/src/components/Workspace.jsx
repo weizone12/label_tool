@@ -129,6 +129,13 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
   const bboxInputRef = useRef(null)
   const filteredImages = images.filter((item) => progressFilter === 'all' || (progressFilter === 'completed' ? item.completed : !item.completed))
   const currentImage = filteredImages[index] || filteredImages[0]
+  const nextImageToPreload = filteredImages[index + 1]
+
+  useEffect(() => {
+    if (!nextImageToPreload || nextImageToPreload.mediaType !== 'image') return
+    const preloader = new window.Image()
+    preloader.src = api.imageUrl(project.id, nextImageToPreload.id)
+  }, [nextImageToPreload?.id, nextImageToPreload?.mediaType, project.id])
 
   const loadImages = useCallback(async () => {
     try {
@@ -387,7 +394,8 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
         setUploadProgress({ current, total })
       })
       await importImageBboxSets(bboxSets, aisFiles, uploadedRecords)
-      await loadImages() 
+      const uploaded = uploadedRecords.map((record) => ({ ...record, completed: false, annotationCount: 0 }))
+      setImages((current) => [...current, ...uploaded].sort((a, b) => mediaDisplayPath(a).localeCompare(mediaDisplayPath(b), undefined, { numeric: true, sensitivity: 'base' })))
     } catch (err) { 
       setError(err.message) 
       await loadImages()

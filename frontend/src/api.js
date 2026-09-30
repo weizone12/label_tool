@@ -151,7 +151,7 @@ export const api = {
     method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(toStoredDocument(data)),
   })),
   saveAnnotationsBulk: async (projectId, items, onProgress) => {
-    const batchSize = 50
+    const batchSize = 100
     let saved = 0
     for (let index = 0; index < items.length; index += batchSize) {
       const batch = items.slice(index, index + batchSize).map(({ imageId, document }) => ({ image_id: imageId, document: toStoredDocument(document) }))

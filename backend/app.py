@@ -103,7 +103,7 @@ def write_text_atomic(path: Path, content: str) -> None:
     temporary.replace(path)
 
 
-def normalize_project(config: dict, directory: Path) -> dict:
+def normalize_project(config: dict, directory: Path, normalize_documents: bool = False) -> dict:
     changed = False
     if config.get("projectType") not in SUPPORTED_PROJECT_TYPES:
         config["projectType"] = "annotation"
@@ -151,18 +151,19 @@ def normalize_project(config: dict, directory: Path) -> dict:
         if original_id != label_id:
             label["id"] = label_id
             changed = True
-    for annotation_path in (directory / "annotations").glob("*.json"):
-        data = read_json(annotation_path, {})
-        if config["primaryMode"] == "classification":
-            classifications = normalized_classifications(data.get("classifications", []), used_ids, id_map)
-            if config.get("classificationMode") == "single":
-                classifications = classifications[:1]
-            data["annotations"] = []
-            data["classifications"] = classifications
-        else:
-            data["annotations"] = normalized_annotations(data.get("annotations", []), config["primaryMode"], used_ids, id_map)
-            data["classifications"] = []
-        write_json_atomic(annotation_path, data)
+    if changed or normalize_documents:
+        for annotation_path in (directory / "annotations").glob("*.json"):
+            data = read_json(annotation_path, {})
+            if config["primaryMode"] == "classification":
+                classifications = normalized_classifications(data.get("classifications", []), used_ids, id_map)
+                if config.get("classificationMode") == "single":
+                    classifications = classifications[:1]
+                data["annotations"] = []
+                data["classifications"] = classifications
+            else:
+                data["annotations"] = normalized_annotations(data.get("annotations", []), config["primaryMode"], used_ids, id_map)
+                data["classifications"] = []
+            write_json_atomic(annotation_path, data)
     if changed:
         write_json_atomic(directory / "project.json", config)
     return config
@@ -194,6 +195,15 @@ def image_record(path: Path, image_id: str | None = None) -> dict:
         "height": height,
         "mediaType": "video" if path.suffix.lower() in ALLOWED_VIDEOS else "image",
     }
+
+
+def cached_image_record(path: Path, image_id: str, metadata: dict) -> tuple[dict, bool]:
+    cached_keys = ("filename", "width", "height", "mediaType")
+    if all(key in metadata for key in cached_keys):
+        return {"id": image_id, **{key: metadata[key] for key in cached_keys}}, False
+    record = image_record(path, image_id)
+    metadata.update({key: record[key] for key in cached_keys})
+    return record, True
 
 
 def image_metadata(directory: Path) -> dict:
@@ -273,13 +283,14 @@ def register_source_images(directory: Path, paths: list[Path], root: Path | None
             except ValueError:
                 pass
         target, stored_metadata = copy_media_into_project(directory, source, Path(relative_path), metadata.get(image_id))
-        metadata[image_id] = stored_metadata
         record = image_record(target, image_id)
+        stored_metadata.update({key: record[key] for key in ("filename", "width", "height", "mediaType")})
+        metadata[image_id] = stored_metadata
         record.update(metadata[image_id])
         registered.append(record)
     write_json_atomic(directory / "images.json", metadata)
     project = read_json(directory / "project.json", {})
-    project["imageCount"] = len(list_image_records(directory))
+    project["imageCount"] = len(metadata)
     project["updatedAt"] = utc_now()
     write_json_atomic(directory / "project.json", project)
     return registered
@@ -307,7 +318,8 @@ def list_image_records(directory: Path) -> list[dict]:
             item.clear()
             item.update(stored_metadata)
             metadata_changed = True
-        record = image_record(stored_source, image_id)
+        record, cache_changed = cached_image_record(stored_source, image_id, item)
+        metadata_changed = metadata_changed or cache_changed
         record.update(item)
         annotation = read_json(directory / "annotations" / f"{image_id}.json", {})
         record["completed"] = bool(annotation.get("completed", False))
@@ -682,7 +694,7 @@ def update_project(project_id: str):
         return jsonify({"error": "請選擇有效的圖片分類模式"}), 400
     existing["updatedAt"] = utc_now()
     write_json_atomic(directory / "project.json", existing)
-    existing = normalize_project(existing, directory)
+    existing = normalize_project(existing, directory, normalize_documents=any(field in body for field in ("projectType", "primaryMode", "labels", "classificationMode")))
     if existing.get("name") != old_name:
         target = available_project_directory(existing["name"], current=directory)
         if target != directory:
@@ -759,7 +771,7 @@ def upload_images(project_id: str):
         file.save(target)
 
         stored_relative = target.resolve().relative_to(images_dir.resolve())
-        metadata[image_id] = {
+        stored_metadata = {
             "sourcePath": str(target.resolve()),
             "originalFilename": original_filename,
             "relativePath": str(relative_path),
@@ -767,12 +779,14 @@ def upload_images(project_id: str):
             "projectRelativePath": (Path("images") / stored_relative).as_posix(),
         }
         record = image_record(target, image_id)
-        record.update(metadata[image_id])
+        stored_metadata.update({key: record[key] for key in ("filename", "width", "height", "mediaType")})
+        metadata[image_id] = stored_metadata
+        record.update(stored_metadata)
         uploaded.append(record)
 
     write_json_atomic(directory / "images.json", metadata)
     project = read_json(directory / "project.json", {})
-    project["imageCount"] = len(list_image_records(directory))
+    project["imageCount"] = len(metadata)
     project["updatedAt"] = utc_now()
     write_json_atomic(directory / "project.json", project)
     
@@ -796,7 +810,18 @@ def resolve_image(project_id: str, image_id: str) -> Path:
 
 
 def annotation_media(directory: Path, image_id: str) -> dict:
-    record = next((item for item in list_image_records(directory) if item["id"] == image_id), None)
+    metadata = image_metadata(directory)
+    item = metadata.get(image_id, {})
+    source_path = item.get("sourcePath")
+    record = None
+    if source_path and Path(source_path).is_file():
+        record, changed = cached_image_record(Path(source_path), image_id, item)
+        record.update(item)
+        if changed:
+            metadata[image_id] = item
+            write_json_atomic(directory / "images.json", metadata)
+    if record is None:
+        record = next((entry for entry in list_image_records(directory) if entry["id"] == image_id), None)
     if not record:
         abort(404, "找不到圖片")
     return {
@@ -889,7 +914,7 @@ def normalized_annotations(items, expected_mode: str, valid_ids: set[str] | None
 
 @app.get("/api/projects/<project_id>/images/<image_id>/content")
 def get_image(project_id: str, image_id: str):
-    return send_file(resolve_image(project_id, image_id))
+    return send_file(resolve_image(project_id, image_id), conditional=True, max_age=86400)
 
 
 @app.get("/api/projects/<project_id>/images/<image_id>/annotation")
@@ -953,7 +978,7 @@ def save_annotation(project_id: str, image_id: str):
 @app.put("/api/projects/<project_id>/annotations/bulk")
 def save_annotations_bulk(project_id: str):
     directory = project_dir(project_id)
-    project = load_project(project_id)
+    project = read_json(directory / "project.json", {})
     if project.get("primaryMode") != "reid":
         return jsonify({"error": "批次 bbox 匯入僅支援 ReID 專案"}), 400
     items = request.get_json(force=True).get("items", [])
