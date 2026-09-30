@@ -1,5 +1,6 @@
 const IMAGE_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'webp', 'bmp', 'tif', 'tiff'])
 const MEDIA_EXTENSIONS = new Set([...IMAGE_EXTENSIONS, 'mp4', 'webm', 'mov', 'm4v', 'avi', 'mkv'])
+export const CAMERA_BURN_IN_OFFSET_MS = 1000
 
 const extension = (name) => String(name || '').split('.').pop().toLocaleLowerCase()
 const normalizedPath = (value) => String(value || '').replaceAll('\\', '/').replace(/^\.\//, '').toLocaleLowerCase()
@@ -39,6 +40,36 @@ export const parseImageBboxRows = async (file) => (await file.text()).split(/\r?
   if (Array.isArray(row.bbox_xywh)) return [{ ...row, detections: [row] }]
   return []
 })
+
+export const discoverAisFiles = (files) => Array.from(files || []).filter((file) => /_ais\.jsonl$/i.test(file.name))
+
+export const parseAisRows = async (file) => (await file.text()).split(/\r?\n/).flatMap((line, index) => {
+  if (!line.trim()) return []
+  let row
+  try { row = JSON.parse(line) } catch { throw new Error(`${file.name} 第 ${index + 1} 行格式錯誤`) }
+  const pixel = row.pixel_xy
+  const timestamp = Date.parse(row.ais_recorded_harbor_ts)
+  if (row.mmsi === undefined || row.mmsi === null || !Array.isArray(pixel) || pixel.length !== 2 || !Number.isFinite(timestamp)) return []
+  const x = Number(pixel[0]), y = Number(pixel[1])
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return []
+  return [{ mmsi: String(row.mmsi), x, y, timestamp, recordedAt: row.ais_recorded_harbor_ts, shipName: row.ship_name || '' }]
+})
+
+export const fileDirectory = (file) => pathParts(file).slice(0, -1).join('/')
+
+export const datasetStartTime = (datasetName) => {
+  const match = String(datasetName || '').match(/(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})(?:_\d+)?$/)
+  if (!match) return null
+  const [, year, month, day, hour, minute, second] = match
+  const timestamp = Date.parse(`${year}-${month}-${day}T${hour}:${minute}:${second}+08:00`)
+  return Number.isFinite(timestamp) ? timestamp : null
+}
+
+export const datasetFrameTime = (datasetName, videoPtsSeconds) => {
+  const start = datasetStartTime(datasetName)
+  const offset = Number(videoPtsSeconds)
+  return start !== null && Number.isFinite(offset) ? start + offset * 1000 + CAMERA_BURN_IN_OFFSET_MS : null
+}
 
 const rowImagePath = (row) => {
   for (const key of ['file_name', 'filename', 'image_name', 'image_path', 'image_file', 'source_image']) {

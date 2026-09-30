@@ -4,7 +4,7 @@ import { api } from '../api'
 import AnnotationCanvas from './AnnotationCanvas'
 import { createId } from '../uuid'
 import { hydrateSegmentationTopology, insertSharedVertices, updateSharedVertices } from '../segmentationTopology'
-import { discoverImageBboxSets, matchBboxRowsToRecords, mediaFilesFromSelection, parseImageBboxRows, selectionPath } from '../reidBboxImport'
+import { datasetFrameTime, discoverAisFiles, discoverImageBboxSets, fileDirectory, matchBboxRowsToRecords, mediaFilesFromSelection, parseAisRows, parseImageBboxRows, selectionPath } from '../reidBboxImport'
 
 const TOOL_NAMES = {
   rectangle: '矩形', polygon: '多邊形', ocr: 'OCR 四邊形', rotated_rectangle: '三點旋轉矩形',
@@ -127,7 +127,6 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
   const fileInputRef = useRef(null)
   const folderInputRef = useRef(null)
   const bboxInputRef = useRef(null)
-  const aisInputRef = useRef(null)
   const filteredImages = images.filter((item) => progressFilter === 'all' || (progressFilter === 'completed' ? item.completed : !item.completed))
   const currentImage = filteredImages[index] || filteredImages[0]
 
@@ -276,7 +275,7 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
     if (selected?.type === 'ocr') setTimeout(() => ocrInputRef.current?.focus(), 0)
   }, [selectedId, selected?.type])
 
-  const importImageBboxSets = async (bboxSets, uploadedRecords) => {
+  const importImageBboxSets = async (bboxSets, aisFiles, uploadedRecords) => {
     if (!bboxSets.length) return
     setImportingBboxes(true)
     try {
@@ -287,7 +286,7 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
         const rows = await parseImageBboxRows(bboxSet.bboxFile)
         const matched = matchBboxRowsToRecords(rows, records)
         if (!matched.length) throw new Error(`${bboxSet.bboxFile.name} 找不到可依檔名配對的圖片資料`)
-        assignments.push(...matched.map((item) => ({ ...item, bboxFile: bboxSet.bboxFile })))
+        assignments.push(...matched.map((item) => ({ ...item, bboxFile: bboxSet.bboxFile, datasetName: bboxSet.datasetName, sourceDirectory: fileDirectory(bboxSet.bboxFile) })))
       }
 
       const validDetection = (detection) => {
@@ -317,6 +316,26 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
       setActiveLabelId(labelIdByClass.get(classNames[0]) || '')
 
       const now = new Date().toISOString()
+      const aisByImageId = new Map()
+      const aisSourceByImageId = new Map()
+      for (const aisFile of aisFiles) {
+        const aisRows = await parseAisRows(aisFile)
+        if (!aisRows.length) continue
+        const directory = fileDirectory(aisFile)
+        const candidates = assignments.flatMap((assignment) => {
+          if (assignment.sourceDirectory !== directory) return []
+          const timestamp = datasetFrameTime(assignment.datasetName, assignment.row.video_pts_s)
+          return timestamp !== null ? [{ assignment, timestamp }] : []
+        })
+        aisRows.forEach((aisRow) => {
+          const closest = candidates.reduce((best, candidate) => !best || Math.abs(candidate.timestamp - aisRow.timestamp) < Math.abs(best.timestamp - aisRow.timestamp) ? candidate : best, null)
+          if (!closest) return
+          const imageId = closest.assignment.record.id
+          if (!aisByImageId.has(imageId)) aisByImageId.set(imageId, [])
+          aisByImageId.get(imageId).push({ mmsi: aisRow.mmsi, x: aisRow.x, y: aisRow.y, recorded_at: aisRow.recordedAt, ship_name: aisRow.shipName })
+          aisSourceByImageId.set(imageId, aisFile.name)
+        })
+      }
       const documents = assignments.map(({ record, row, bboxFile }) => {
         const sourceWidth = Number(row.source_width ?? row.image_width) || record.width || 1
         const sourceHeight = Number(row.source_height ?? row.image_height) || record.height || 1
@@ -334,10 +353,15 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
             source_class: detection.class ?? null, confidence: detection.confidence ?? null, source_detection_index: detectionIndex,
           }]
         })
+        const mmsiRecords = aisByImageId.get(record.id) || []
         return { imageId: record.id, document: {
           annotations,
           classifications: [], completed: false, revision: 0,
-          editor_state: { reid_edit_only: true, bbox_source_name: bboxFile.name },
+          editor_state: {
+            reid_edit_only: true,
+            bbox_source_name: bboxFile.name,
+            ...(mmsiRecords.length ? { mmsi_source_name: aisSourceByImageId.get(record.id), mmsi_records: mmsiRecords } : {}),
+          },
         } }
       })
       setUploadStage('bbox')
@@ -353,6 +377,7 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
     const selectedFiles = Array.from(files)
     const mediaFiles = mediaFilesFromSelection(selectedFiles)
     const bboxSets = editingProject && tool === 'reid' ? discoverImageBboxSets(selectedFiles) : []
+    const aisFiles = editingProject && tool === 'reid' ? discoverAisFiles(selectedFiles) : []
     if (!mediaFiles.length) { setError('選取範圍內沒有可載入的圖片或影片'); return }
     setUploading(true)
     setUploadStage('media')
@@ -361,7 +386,7 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
       const uploadedRecords = await api.uploadImages(project.id, mediaFiles, (current, total) => {
         setUploadProgress({ current, total })
       })
-      await importImageBboxSets(bboxSets, uploadedRecords)
+      await importImageBboxSets(bboxSets, aisFiles, uploadedRecords)
       await loadImages() 
     } catch (err) { 
       setError(err.message) 
@@ -445,34 +470,6 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
     }
   }
 
-  const handleAisJsonl = async (event) => {
-    const file = event.target.files?.[0]
-    event.target.value = ''
-    if (!file || !isAdmin || !reidEditOnly) return
-    try {
-      const records = (await file.text()).split(/\r?\n/).filter((line) => line.trim()).flatMap((line, index) => {
-        let row
-        try { row = JSON.parse(line) } catch { throw new Error(`JSONL 第 ${index + 1} 行格式錯誤`) }
-        const pixel = row.pixel_xy
-        if (row.mmsi === undefined || row.mmsi === null || !Array.isArray(pixel) || pixel.length !== 2) return []
-        const x = Number(pixel[0]), y = Number(pixel[1])
-        if (!Number.isFinite(x) || !Number.isFinite(y)) return []
-        return [{ mmsi: String(row.mmsi), x, y }]
-      })
-      if (!records.length) throw new Error('JSONL 中找不到有效的 mmsi 與 pixel_xy')
-      const mmsiValues = [...new Set(records.map((item) => item.mmsi))].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
-      setAisRecords(records)
-      setSelectedMmsi(mmsiValues[0])
-      setAisSourceName(file.name)
-      commit((current) => ({
-        ...current,
-        editor_state: { ...current.editor_state, mmsi_source_name: file.name, mmsi_records: records },
-      }))
-    } catch (err) {
-      setError(err.message)
-    }
-  }
-
   const toggleClassification = (labelId) => commit((current) => {
     const selected = current.classifications.some((item) => item.label_id === labelId)
     const classifications = project.classificationMode === 'single'
@@ -508,8 +505,10 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
   const reidEditOnly = editingProject && tool === 'reid'
   const frameTimeline = reidEditOnly ? (document.editor_state?.frame_timeline || []) : []
   const mmsiOptions = [...new Set(aisRecords.map((item) => item.mmsi))].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
-  const aisOverlayPoints = reidEditOnly && selectedMmsi && videoMetadata
-    ? aisRecords.filter((item) => item.mmsi === selectedMmsi).map((item) => ({ ...item, x: item.x * currentImage.width / videoMetadata.width, y: item.y * currentImage.height / videoMetadata.height }))
+  const aisOverlayPoints = reidEditOnly && selectedMmsi
+    ? aisRecords.filter((item) => item.mmsi === selectedMmsi).map((item) => currentImage?.mediaType === 'video' && videoMetadata
+      ? { ...item, x: item.x * currentImage.width / videoMetadata.width, y: item.y * currentImage.height / videoMetadata.height }
+      : item)
     : []
 
   const addLabel = async () => {
@@ -637,7 +636,6 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
       <input ref={fileInputRef} className="hidden-file-input" type="file" multiple accept={editingProject ? 'image/*,video/*,.jsonl' : (project.primaryMode === 'reid' ? 'image/*,video/*' : 'image/*')} onChange={handleUpload} />
       <input ref={folderInputRef} className="hidden-file-input" type="file" multiple webkitdirectory="" directory="" onChange={handleUpload} />
       {isAdmin && <input ref={bboxInputRef} className="hidden-file-input" type="file" accept=".jsonl,application/json,text/plain" onChange={handleBboxJsonl} />}
-      {isAdmin && <input ref={aisInputRef} className="hidden-file-input" type="file" accept=".jsonl,application/json,text/plain" onChange={handleAisJsonl} />}
       {/* 👇 新增：上傳進度遮罩 */}
       {uploading && (
         <div style={{ position: 'absolute', inset: 0, zIndex: 9999, backgroundColor: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -657,7 +655,6 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
           {isAdmin && <button className="secondary-button compact" onClick={() => fileInputRef.current?.click()} disabled={uploading}><ImagePlus size={16} />新增檔案</button>}
           {isAdmin && <button className="secondary-button compact" onClick={() => folderInputRef.current?.click()} disabled={uploading}><FolderOpen size={16} />選擇資料夾</button>}
           {isAdmin && editingProject && tool === 'reid' && currentImage?.mediaType === 'video' && <button className="secondary-button compact" onClick={() => bboxInputRef.current?.click()} disabled={importingBboxes || !videoMetadata}>{importingBboxes ? '開啟中…' : '開啟 bbox JSONL'}</button>}
-          {isAdmin && reidEditOnly && <button className="secondary-button compact" onClick={() => aisInputRef.current?.click()}>開啟 MMSI JSONL</button>}
           <div className="save-status"><span className={`status-dot ${saveState === '儲存失敗' ? 'failed' : ''}`} />{saveState}<button className="secondary-button compact" onClick={() => save()} disabled={!currentImage}><Save size={16} />手動儲存</button></div>
         </div>
       </header>
