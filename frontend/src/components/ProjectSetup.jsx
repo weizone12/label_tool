@@ -12,6 +12,7 @@ const blankLabel = (index = 0) => ({
 })
 
 const readableLabelId = (name, index) => name.trim().toLocaleLowerCase().replace(/[^\p{L}\p{N}_-]+/gu, '-').replace(/^[-_]+|[-_]+$/g, '') || `label-${index + 1}`
+const normalizeGroupPath = (value) => value.split('/').map((part) => part.trim()).filter(Boolean).join(' / ')
 
 export default function ProjectSetup({ onCancel, onCreated, existingGroups = [], initialGroup = '' }) {
   const [name, setName] = useState('')
@@ -42,7 +43,7 @@ export default function ProjectSetup({ onCancel, onCreated, existingGroups = [],
         id: 'ocr-text', name: '文字', color: '#22d3ee', system: true,
         attributes: [{ id: 'transcription', name: '辨識文字', type: 'text', system: true }],
       }, ...cleanLabels]
-      onCreated(await api.createProject({ name: name.trim(), group: group.trim(), projectType, primaryMode: selectedMode, labels: cleanLabels, ...(selectedMode === 'classification' ? { classificationMode } : {}), mediaType: selectedMode === 'reid' ? 'both' : 'image' }))
+      onCreated(await api.createProject({ name: name.trim(), group: normalizeGroupPath(group), projectType, primaryMode: selectedMode, labels: cleanLabels, ...(selectedMode === 'classification' ? { classificationMode } : {}), mediaType: selectedMode === 'reid' ? 'both' : 'image' }))
     } catch (err) { setError(err.message) }
   }
 
@@ -53,7 +54,7 @@ export default function ProjectSetup({ onCancel, onCreated, existingGroups = [],
       {error && <div className="error-banner">{error}</div>}
       <section className="setup-section">
         <label className="field"><span>專案名稱</span><input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="例如：街景物件資料集" /></label>
-        <label className="field"><span>專案群組（選填）</span><input list="project-group-options" value={group} onChange={(e) => setGroup(e.target.value)} placeholder="選擇既有群組或輸入新群組名稱" /><datalist id="project-group-options">{existingGroups.map((item) => <option key={item} value={item} />)}</datalist><small>指定後，專案只會顯示在該群組資料夾內。</small></label>
+        <label className="field"><span>專案群組（選填）</span><input list="project-group-options" value={group} onChange={(e) => setGroup(e.target.value)} placeholder="例如：2026 年資料 / 9 月 / cam1" /><datalist id="project-group-options">{existingGroups.map((item) => <option key={item} value={item} />)}</datalist><small>使用「/」分隔父群組與子群組；也可以選擇既有群組後繼續輸入子群組。</small></label>
         <div className="field"><span>專案類型（單選）</span><div className="option-grid"><button className={`option-card ${projectType === 'annotation' ? 'selected' : ''}`} onClick={() => setProjectType('annotation')}>{projectType === 'annotation' && <Check size={17} />}標註專案</button><button className={`option-card ${projectType === 'editing' ? 'selected' : ''}`} onClick={() => setProjectType('editing')}>{projectType === 'editing' && <Check size={17} />}純修改專案</button></div></div>
         {projectType === 'annotation' ? <div className="field"><span>主要標註方式（單選）</span><div className="option-grid primary-modes">{MODE_OPTIONS.map((mode) => {
           const selected = primaryMode === mode
