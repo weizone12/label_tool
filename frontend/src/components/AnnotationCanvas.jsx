@@ -61,7 +61,7 @@ const nearestTimelineFrame = (timeline, time) => {
   return Math.abs(previous.video_pts_s - time) <= Math.abs(next.video_pts_s - time) ? previous.frame_index : next.frame_index
 }
 
-export default function AnnotationCanvas({ image, imageUrl, annotations, labels, activeLabelId, tool, selectedId, onSelect, onCommit, onUpdate, onDraftActiveChange, resetToken, currentFrame = 0, onFrameChange, readOnlyGeometry = false, frameTimeline = [], onVideoMetadata, overlayPoints = [], snapTolerance = DEFAULT_SNAP_TOLERANCE }) {
+export default function AnnotationCanvas({ image, imageUrl, annotations, labels, activeLabelId, tool, selectedId, onSelect, onCommit, onUpdate, onDraftActiveChange, resetToken, currentFrame = 0, onFrameChange, readOnlyGeometry = false, frameTimeline = [], onVideoMetadata, overlayPoints = [], showReidInfo = false, snapTolerance = DEFAULT_SNAP_TOLERANCE }) {
   const svgRef = useRef(null)
   const videoRef = useRef(null)
   const [view, setView] = useState({ x: 0, y: 0, zoom: 1 })
@@ -395,7 +395,7 @@ export default function AnnotationCanvas({ image, imageUrl, annotations, labels,
     <div className="canvas-wrap">
       <svg ref={svgRef} className={interaction?.type === 'pan' ? 'panning' : ''} viewBox={viewBox} preserveAspectRatio="xMidYMid meet" onPointerDown={handlePointerDown} onPointerMove={handlePointerMove} onPointerUp={handlePointerUp} onPointerLeave={() => { setCursor(null); setRouteToggle(false) }} onContextMenu={(event) => event.preventDefault()} onWheel={handleWheel} onDoubleClick={() => ['polygon', 'semantic_segmentation', 'instance_segmentation'].includes(tool) && draft.length >= 3 && confirmFinish(draft)}>
         {image.mediaType === 'video' ? <foreignObject x="0" y="0" width={image.width || 1280} height={image.height || 720} style={{ pointerEvents: 'none' }}><video ref={videoRef} src={imageUrl} style={{ width: '100%', height: '100%', objectFit: 'contain' }} onLoadedMetadata={(event) => onVideoMetadata?.({ width: event.currentTarget.videoWidth, height: event.currentTarget.videoHeight })} onTimeUpdate={(event) => onFrameChange?.(nearestTimelineFrame(frameTimeline, event.currentTarget.currentTime))} /></foreignObject> : <image href={imageUrl} x="0" y="0" width={image.width} height={image.height} />}
-        {renderedAnnotations.map((item) => <Shape key={item.id} item={item} color={labels.find((label) => label.id === item.labelId)?.color || '#fff'} selected={item.id === selectedId} zoom={view.zoom} readOnlyGeometry={readOnlyGeometry} />)}
+        {renderedAnnotations.map((item) => <Shape key={item.id} item={item} color={labels.find((label) => label.id === item.labelId)?.color || '#fff'} selected={item.id === selectedId} zoom={view.zoom} readOnlyGeometry={readOnlyGeometry} showReidInfo={showReidInfo} imageWidth={image.width} imageHeight={image.height} />)}
         {overlayPoints.map((point, index) => <g key={`${point.mmsi}-${index}`} pointerEvents="none"><circle cx={point.x} cy={point.y} r={7 / view.zoom} fill="#22d3ee" stroke="#fff" strokeWidth={2 / view.zoom} vectorEffect="non-scaling-stroke" /><line x1={point.x - 12 / view.zoom} y1={point.y} x2={point.x + 12 / view.zoom} y2={point.y} stroke="#22d3ee" strokeWidth={2 / view.zoom} vectorEffect="non-scaling-stroke" /><line x1={point.x} y1={point.y - 12 / view.zoom} x2={point.x} y2={point.y + 12 / view.zoom} stroke="#22d3ee" strokeWidth={2 / view.zoom} vectorEffect="non-scaling-stroke" /><text x={point.x + 11 / view.zoom} y={point.y - 11 / view.zoom} fill="#fff" stroke="#08111f" strokeWidth={3 / view.zoom} paintOrder="stroke" fontSize={14 / view.zoom} fontWeight="700">{point.mmsi}</text></g>)}
         {preview.length > 0 && (previewIsBox ? <polygon className="draft-shape" points={preview.map((p) => `${p.x},${p.y}`).join(' ')} strokeWidth={2 / view.zoom} vectorEffect="non-scaling-stroke" /> : <polyline className={`draft-shape ${cursor?.chain?.length ? 'boundary-chain-preview' : ''}`} points={preview.map((p) => `${p.x},${p.y}`).join(' ')} strokeWidth={2 / view.zoom} vectorEffect="non-scaling-stroke" />)}
         {draft.map((point, index) => <circle key={index} cx={point.x} cy={point.y} r={5 / view.zoom} className="vertex draft" />)}
@@ -408,9 +408,29 @@ export default function AnnotationCanvas({ image, imageUrl, annotations, labels,
   )
 }
 
-function Shape({ item, color, selected, zoom, readOnlyGeometry }) {
+function ReidInfoTag({ item, color, zoom, imageWidth, imageHeight }) {
+  const value = (input) => {
+    const text = input === undefined || input === null || input === '' ? '—' : String(input)
+    return text.length > 24 ? `${text.slice(0, 21)}…` : text
+  }
+  const rows = [`GID: ${value(item.identity_id)}`, `LID: ${value(item.track_id)}`, `MMSI: ${value(item.mmsi)}`]
+  const width = Math.max(78, Math.max(...rows.map((row) => row.length)) * 6.7 + 10) / zoom
+  const height = 50 / zoom
+  const left = Math.min(item.points[0].x, item.points[1].x)
+  const top = Math.min(item.points[0].y, item.points[1].y)
+  const x = Math.max(0, Math.min(Math.max(0, imageWidth - width), left))
+  const y = Math.max(0, Math.min(Math.max(0, imageHeight - height), top))
+  return <g pointerEvents="none">
+    <rect x={x} y={y} width={width} height={height} rx={4 / zoom} fill="#020617" fillOpacity=".88" stroke={color} strokeWidth={1 / zoom} vectorEffect="non-scaling-stroke" />
+    <text x={x + 5 / zoom} y={y + 13 / zoom} fill="#f8fafc" fontSize={11 / zoom} fontFamily="'DM Mono', monospace" fontWeight="600">
+      {rows.map((row, index) => <tspan key={row} x={x + 5 / zoom} dy={index === 0 ? 0 : 14 / zoom}>{row}</tspan>)}
+    </text>
+  </g>
+}
+
+function Shape({ item, color, selected, zoom, readOnlyGeometry, showReidInfo, imageWidth, imageHeight }) {
   const common = { fill: color, fillOpacity: selected ? 0.48 : 0.12, stroke: color, strokeWidth: (selected ? 3 : 2) / zoom, vectorEffect: 'non-scaling-stroke', className: selected ? 'annotation-shape selected' : 'annotation-shape' }
   const points = annotationPoints(item)
   const showVertices = !readOnlyGeometry && (selected || isSegmentation(item.type))
-  return <g>{['rectangle', 'reid'].includes(item.type) ? <rect x={Math.min(item.points[0].x, item.points[1].x)} y={Math.min(item.points[0].y, item.points[1].y)} width={Math.abs(item.points[1].x - item.points[0].x)} height={Math.abs(item.points[1].y - item.points[0].y)} {...common} /> : <polygon points={points.map((p) => `${p.x},${p.y}`).join(' ')} {...common} />}{showVertices && points.map((point, index) => <circle key={index} cx={point.x} cy={point.y} r={4 / zoom} fill="#fff" stroke={color} strokeWidth={2 / zoom} />)}</g>
+  return <g>{['rectangle', 'reid'].includes(item.type) ? <rect x={Math.min(item.points[0].x, item.points[1].x)} y={Math.min(item.points[0].y, item.points[1].y)} width={Math.abs(item.points[1].x - item.points[0].x)} height={Math.abs(item.points[1].y - item.points[0].y)} {...common} /> : <polygon points={points.map((p) => `${p.x},${p.y}`).join(' ')} {...common} />}{showVertices && points.map((point, index) => <circle key={index} cx={point.x} cy={point.y} r={4 / zoom} fill="#fff" stroke={color} strokeWidth={2 / zoom} />)}{showReidInfo && item.type === 'reid' && <ReidInfoTag item={item} color={color} zoom={zoom} imageWidth={imageWidth} imageHeight={imageHeight} />}</g>
 }

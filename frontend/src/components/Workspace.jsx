@@ -133,6 +133,7 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
   const [selectedMmsi, setSelectedMmsi] = useState('')
   const [copiedMmsi, setCopiedMmsi] = useState('')
   const [aisSourceName, setAisSourceName] = useState('')
+  const [showReidInfo, setShowReidInfo] = useState(true)
   
   // 👇 新增：上傳狀態與進度
   const [uploading, setUploading] = useState(false)
@@ -408,7 +409,7 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
           return [{
             id: createId(), type: 'reid', labelId: labelIdByClass.get(detectionClass),
             points,
-            attributes: {}, identity_id: '', track_id: null, camera_id: null, video_id: null, frame_id: null,
+            attributes: {}, identity_id: detection.identity_id ?? detection.gid ?? '', track_id: detection.track_id ?? detection.lid ?? null, camera_id: null, video_id: null, frame_id: null, mmsi: detection.mmsi == null ? '' : String(detection.mmsi),
             hidden: false, locked: false, keyframe: false, generated: false, created_at: now,
             source_class: detection.class ?? null, confidence: detection.confidence ?? null, source_detection_index: detectionIndex,
           }]
@@ -515,7 +516,7 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
         return [{
           id: createId(), type: 'reid', labelId: labelIdByClass.get(detectionClass),
           points,
-          attributes: {}, identity_id: '', track_id: null, camera_id: null, video_id: null, frame_id: row.frame_index,
+          attributes: {}, identity_id: detection.identity_id ?? detection.gid ?? '', track_id: detection.track_id ?? detection.lid ?? null, camera_id: null, video_id: null, frame_id: row.frame_index, mmsi: detection.mmsi == null ? '' : String(detection.mmsi),
           hidden: false, locked: false, keyframe: false, generated: false, created_at: now,
           source_class: detection.class ?? null, confidence: detection.confidence ?? null, source_detection_index: detectionIndex,
         }]
@@ -549,7 +550,7 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
       ...annotation,
       ...(tool === 'reid' ? { points: fitBoxWithinBounds(annotation.points, currentImage?.width, currentImage?.height) } : {}),
       ...(currentImage?.mediaType === 'video' ? { frame_id: currentFrame, keyframe: true } : {}),
-      ...(tool === 'reid' ? { identity_id: '', track_id: null, camera_id: null, video_id: null, frame_id: currentImage?.mediaType === 'video' ? currentFrame : null } : {}),
+      ...(tool === 'reid' ? { identity_id: '', track_id: null, camera_id: null, video_id: null, frame_id: currentImage?.mediaType === 'video' ? currentFrame : null, mmsi: '' } : {}),
     }
     commit((current) => {
       const annotations = [...insertSharedVertices(current.annotations, edgeInsertions), enriched]
@@ -705,7 +706,7 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
 
   const selectionEditor = selected && <section ref={selectedEditorRef} className="selection-editor"><div className="selection-title"><span className="panel-label">選取項目</span>{!reidEditOnly && <div><button className="icon-button" title={selected.hidden ? '顯示' : '隱藏'} onClick={() => updateSelected({ hidden: !selected.hidden })}>{selected.hidden ? <EyeOff size={15} /> : <Eye size={15} />}</button><button className="icon-button" title={selected.locked ? '解鎖' : '鎖定'} onClick={() => updateSelected({ locked: !selected.locked })}>{selected.locked ? <Lock size={15} /> : <Unlock size={15} />}</button><button className="icon-button danger" onClick={deleteSelected}><Trash2 size={15} /></button></div>}</div>
     {selected.type !== 'ocr' && <label className="field small"><span>Label</span><select value={selected.labelId} onChange={(e) => updateSelected({ labelId: e.target.value })}>{project.labels.filter((label) => !label.system).map((label) => <option key={label.id} value={label.id}>{label.name}</option>)}</select></label>}
-    {selected.type === 'reid' && <><label className="field small"><span>Identity ID（跨圖片身分）</span><input value={selected.identity_id || ''} onChange={(e) => updateSelected({ identity_id: e.target.value })} placeholder="例如 person_001" /></label><label className="field small"><span>Track ID（同影片軌跡）</span><input value={selected.track_id || ''} onChange={(e) => updateSelected({ track_id: e.target.value })} /></label><label className="field small"><span>Camera ID</span><input value={selected.camera_id || ''} onChange={(e) => updateSelected({ camera_id: e.target.value })} /></label><label className="field small"><span>Video ID</span><input value={selected.video_id || ''} onChange={(e) => updateSelected({ video_id: e.target.value })} /></label>{currentImage?.mediaType === 'video' && <label className="field small"><span>Frame ID</span><input value={selected.frame_id ?? ''} readOnly /></label>}{currentImage?.mediaType === 'video' && !reidEditOnly && <label className="classification-toggle"><input type="checkbox" checked={Boolean(selected.keyframe)} onChange={(e) => updateSelected({ keyframe: e.target.checked })} /><span><strong>關鍵影格</strong><small>此框為追蹤軌跡的明確標註點</small></span></label>}</>}
+    {selected.type === 'reid' && <><label className="field small"><span>Identity ID（GID／跨圖片身分）</span><input value={selected.identity_id || ''} onChange={(e) => updateSelected({ identity_id: e.target.value })} placeholder="例如 person_001" /></label><label className="field small"><span>Track ID（LID／同影片軌跡）</span><input value={selected.track_id || ''} onChange={(e) => updateSelected({ track_id: e.target.value })} /></label><label className="field small"><span>MMSI</span><input value={selected.mmsi || ''} onChange={(e) => updateSelected({ mmsi: e.target.value })} placeholder="例如 416035000" /></label><label className="field small"><span>Camera ID</span><input value={selected.camera_id || ''} onChange={(e) => updateSelected({ camera_id: e.target.value })} /></label><label className="field small"><span>Video ID</span><input value={selected.video_id || ''} onChange={(e) => updateSelected({ video_id: e.target.value })} /></label>{currentImage?.mediaType === 'video' && <label className="field small"><span>Frame ID</span><input value={selected.frame_id ?? ''} readOnly /></label>}{currentImage?.mediaType === 'video' && !reidEditOnly && <label className="classification-toggle"><input type="checkbox" checked={Boolean(selected.keyframe)} onChange={(e) => updateSelected({ keyframe: e.target.checked })} /><span><strong>關鍵影格</strong><small>此框為追蹤軌跡的明確標註點</small></span></label>}</>}
     {selectedLabel?.attributes.map((attribute) => <label className="field small" key={attribute.id}><span>{attribute.name}</span><input ref={selected.type === 'ocr' && attribute.id === 'transcription' ? ocrInputRef : null} type={attribute.type === 'number' ? 'number' : 'text'} value={selected.attributes?.[attribute.id] ?? ''} onChange={(e) => updateSelected({ attributes: { ...selected.attributes, [attribute.id]: attribute.type === 'number' ? (e.target.value === '' ? null : Number(e.target.value)) : e.target.value } })} placeholder={selected.type === 'ocr' ? '輸入框內文字' : ''} /></label>)}
   </section>
 
@@ -743,6 +744,7 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
           <button className="tool-button active">{tool === 'rectangle' ? '▭' : tool === 'polygon' ? '⬡' : tool === 'ocr' ? 'T' : '◇'}<span>{TOOL_NAMES[tool]}</span></button>
           <div className="tool-divider" />
           <button className="tool-button" onClick={() => setResetToken((value) => value + 1)}><RotateCcw size={19} /><span>重設視角 R</span></button>
+          {tool === 'reid' && <button className={`tool-button ${showReidInfo ? 'active' : ''}`} onClick={() => setShowReidInfo((value) => !value)}>{showReidInfo ? <Eye size={19} /> : <EyeOff size={19} />}<span>{showReidInfo ? '隱藏 ID 資訊' : '顯示 ID 資訊'}</span></button>}
           <button className="tool-button" disabled={downloading} onClick={async () => {
             setDownloading(true); setError('')
             try { await api.downloadProject(project.id) }
@@ -752,7 +754,7 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
         </aside>
         <section className="canvas-column">
           <div className="mode-banner on">{reidEditOnly ? `ReID 純修改模式 · bbox 已鎖定 · 可修改屬性與 ID${document.editor_state?.bbox_source_name ? ` · ${document.editor_state.bbox_source_name}` : ''}` : tool === 'classification' ? '圖片分類模式 · 於右側選擇圖片層級 label · 右鍵拖曳視角' : '整合模式 · 左鍵標註／編輯 · 右鍵拖曳視角'}</div>
-          {!currentImage ? (progressFilter === 'all' ? <div className="upload-empty"><ImagePlus size={46} /><strong>{isAdmin ? '載入圖片／影片資料集' : '專案目前沒有可標註資料'}</strong><span>{isAdmin ? (editingProject ? '可直接選擇最外層日期資料夾；工具會遞迴載入圖片並自動套用各自的「資料夾名_bbox.jsonl」' : '可選擇多個檔案或整個資料夾；檔案會複製至專案資料夾') : '請聯絡管理員加入圖片或影片'}</span>{isAdmin && <div className="upload-actions"><button className="primary-button" onClick={() => fileInputRef.current?.click()} disabled={uploading}><ImagePlus size={16} />選擇檔案</button><button className="secondary-button" onClick={() => folderInputRef.current?.click()} disabled={uploading}><FolderOpen size={16} />選擇資料夾</button></div>}</div> : <div className="upload-empty"><strong>此分群沒有檔案</strong><span>{progressFilter === 'completed' ? '目前沒有已完成的資料' : '目前沒有未完成的資料'}</span></div>) : <AnnotationCanvas key={currentImage.id} image={currentImage} imageUrl={api.imageUrl(project.id, currentImage.id)} annotations={visibleAnnotations} labels={project.labels} activeLabelId={tool === 'ocr' ? 'ocr-text' : activeLabelId} tool={tool} selectedId={selectedId} onSelect={setSelectedId} onCommit={reidEditOnly ? () => {} : handleCanvasCommit} onUpdate={reidEditOnly ? () => {} : handleCanvasUpdate} onDraftActiveChange={handleDraftActiveChange} resetToken={resetToken} currentFrame={currentFrame} onFrameChange={(frame) => { setCurrentFrame(frame); setSelectedId(null) }} readOnlyGeometry={reidEditOnly} frameTimeline={frameTimeline} onVideoMetadata={setVideoMetadata} overlayPoints={aisOverlayPoints} />}
+          {!currentImage ? (progressFilter === 'all' ? <div className="upload-empty"><ImagePlus size={46} /><strong>{isAdmin ? '載入圖片／影片資料集' : '專案目前沒有可標註資料'}</strong><span>{isAdmin ? (editingProject ? '可直接選擇最外層日期資料夾；工具會遞迴載入圖片並自動套用各自的「資料夾名_bbox.jsonl」' : '可選擇多個檔案或整個資料夾；檔案會複製至專案資料夾') : '請聯絡管理員加入圖片或影片'}</span>{isAdmin && <div className="upload-actions"><button className="primary-button" onClick={() => fileInputRef.current?.click()} disabled={uploading}><ImagePlus size={16} />選擇檔案</button><button className="secondary-button" onClick={() => folderInputRef.current?.click()} disabled={uploading}><FolderOpen size={16} />選擇資料夾</button></div>}</div> : <div className="upload-empty"><strong>此分群沒有檔案</strong><span>{progressFilter === 'completed' ? '目前沒有已完成的資料' : '目前沒有未完成的資料'}</span></div>) : <AnnotationCanvas key={currentImage.id} image={currentImage} imageUrl={api.imageUrl(project.id, currentImage.id)} annotations={visibleAnnotations} labels={project.labels} activeLabelId={tool === 'ocr' ? 'ocr-text' : activeLabelId} tool={tool} selectedId={selectedId} onSelect={setSelectedId} onCommit={reidEditOnly ? () => {} : handleCanvasCommit} onUpdate={reidEditOnly ? () => {} : handleCanvasUpdate} onDraftActiveChange={handleDraftActiveChange} resetToken={resetToken} currentFrame={currentFrame} onFrameChange={(frame) => { setCurrentFrame(frame); setSelectedId(null) }} readOnlyGeometry={reidEditOnly} frameTimeline={frameTimeline} onVideoMetadata={setVideoMetadata} overlayPoints={aisOverlayPoints} showReidInfo={showReidInfo} />}
           <footer className="image-nav"><button onClick={() => navigate(-1)} disabled={index === 0}><ChevronLeft size={18} />上一張</button><div className="progress-track"><span style={{ width: images.length ? `${((index + 1) / images.length) * 100}%` : '0%' }} /></div><button onClick={() => navigate(1)} disabled={index >= images.length - 1}>下一張<ChevronRight size={18} /></button></footer>
         </section>
         <aside className="inspector-panel">

@@ -44,6 +44,7 @@ const toEditorAnnotation = (annotation) => ({
     camera_id: annotation.camera_id,
     video_id: annotation.video_id,
     frame_id: annotation.frame_id,
+    mmsi: annotation.mmsi,
   } : {}),
 })
 
@@ -69,7 +70,8 @@ const toStoredAnnotation = (annotation) => {
     stored.camera_id = annotation.camera_id || null
     stored.video_id = annotation.video_id || null
     stored.frame_id = annotation.frame_id ?? null
-    for (const key of ['identity_id', 'track_id', 'camera_id', 'video_id', 'frame_id']) delete stored.metadata[key]
+    stored.mmsi = annotation.mmsi || null
+    for (const key of ['identity_id', 'track_id', 'camera_id', 'video_id', 'frame_id', 'mmsi']) delete stored.metadata[key]
   }
   return stored
 }

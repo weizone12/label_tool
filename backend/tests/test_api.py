@@ -350,7 +350,7 @@ class ApiTestCase(unittest.TestCase):
                 annotation = {
                     "id": str(uuid.uuid4()), "mode": mode, "label_id": "person", "attributes": {},
                     "geometry": {"x": 4, "y": 4, "width": 28, "height": 20} if mode == "reid" else {"polygons": [[[4, 4], [32, 4], [32, 24]]]},
-                    "metadata": {"identity_id": "person-1", "track_id": "track-1", "camera_id": "cam-1", "frame_id": 1},
+                    "metadata": {"identity_id": "person-1", "track_id": "track-1", "camera_id": "cam-1", "frame_id": 1, "mmsi": "123456789"},
                 }
                 response = self.client.put(f"/api/projects/{project['id']}/images/{image['id']}/annotation", json={"annotations": [annotation], "completed": True})
                 self.assertEqual(response.status_code, 200)
@@ -360,9 +360,11 @@ class ApiTestCase(unittest.TestCase):
                 if mode == "reid":
                     self.assertEqual(saved.get("identity_id"), "person-1")
                     self.assertEqual(saved.get("track_id"), "track-1")
-                    self.assertTrue({"identity_id", "track_id", "camera_id", "video_id", "frame_id"}.issubset(saved))
+                    self.assertEqual(saved.get("mmsi"), "123456789")
+                    self.assertTrue({"identity_id", "track_id", "camera_id", "video_id", "frame_id", "mmsi"}.issubset(saved))
                     self.assertNotIn("identity_id", saved["metadata"])
                     self.assertNotIn("track_id", saved["metadata"])
+                    self.assertNotIn("mmsi", saved["metadata"])
                 self.assertFalse((directory / "exports").exists())
 
 
