@@ -301,7 +301,7 @@ class ApiTestCase(unittest.TestCase):
         stored = self.client.get(f"/api/projects/{project['id']}/images/{image['id']}/annotation").get_json()
         self.assertEqual(stored["editor_state"]["bbox_source_name"], "pure editing_bbox.jsonl")
 
-    def test_reid_lid_batch_update_changes_label_and_mmsi_across_images(self):
+    def test_reid_gid_batch_update_changes_label_and_mmsi_across_images(self):
         source_mmsi_id = str(uuid.uuid4())
         target_mmsi_id = str(uuid.uuid4())
         project = self.client.post("/api/projects", json={
@@ -314,7 +314,7 @@ class ApiTestCase(unittest.TestCase):
                 ]},
             ],
         }).get_json()
-        source_dir = Path(self.temp_dir.name) / "reid-lid-source"
+        source_dir = Path(self.temp_dir.name) / "reid-gid-source"
         source_dir.mkdir()
         sources = []
         for filename in ("one.png", "two.png"):
@@ -328,7 +328,7 @@ class ApiTestCase(unittest.TestCase):
                 "id": str(uuid.uuid4()), "mode": "reid", "label_id": "other",
                 "geometry": {"x": 1, "y": 2, "width": 20, "height": 10},
                 "attributes": {source_mmsi_id: f"old-{image_index}"},
-                "identity_id": "gid-1", "track_id": 7,
+                "identity_id": "gid-1", "track_id": image_index + 1,
             }]
             if image_index == 0:
                 annotations.append({
@@ -342,8 +342,8 @@ class ApiTestCase(unittest.TestCase):
             })
             self.assertEqual(response.status_code, 200)
 
-        response = self.client.put(f"/api/projects/{project['id']}/reid/lid", json={
-            "lid": "7", "label_id": "ship", "mmsi": "416035000",
+        response = self.client.put(f"/api/projects/{project['id']}/reid/gid", json={
+            "gid": "gid-1", "label_id": "ship", "mmsi": "416035000",
         })
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json(), {
@@ -351,7 +351,7 @@ class ApiTestCase(unittest.TestCase):
         })
         for record in records:
             annotations = self.client.get(f"/api/projects/{project['id']}/images/{record['id']}/annotation").get_json()["annotations"]
-            updated = next(item for item in annotations if str(item["track_id"]) == "7")
+            updated = next(item for item in annotations if item["identity_id"] == "gid-1")
             self.assertEqual(updated["label_id"], "ship")
             self.assertEqual(updated["attributes"], {target_mmsi_id: "416035000"})
         untouched = self.client.get(f"/api/projects/{project['id']}/images/{records[0]['id']}/annotation").get_json()["annotations"][1]

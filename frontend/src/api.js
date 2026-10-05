@@ -162,7 +162,7 @@ export const api = {
       onProgress?.(saved, items.length)
     }
   },
-  updateReidByLid: (projectId, data) => request(`/api/projects/${projectId}/reid/lid`, {
+  updateReidByGid: (projectId, data) => request(`/api/projects/${projectId}/reid/gid`, {
     method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data),
   }),
   imageUrl: (projectId, imageId) => `/api/projects/${projectId}/images/${imageId}/content`,

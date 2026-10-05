@@ -1041,19 +1041,19 @@ def save_annotations_bulk(project_id: str):
     return jsonify({"saved": saved})
 
 
-@app.put("/api/projects/<project_id>/reid/lid")
-def update_reid_lid(project_id: str):
+@app.put("/api/projects/<project_id>/reid/gid")
+def update_reid_gid(project_id: str):
     directory = project_dir(project_id)
     project = load_project(project_id)
     if project.get("primaryMode") != "reid":
-        return jsonify({"error": "LID 批次套用僅支援 ReID 專案"}), 400
+        return jsonify({"error": "GID 批次套用僅支援 ReID 專案"}), 400
 
     body = request.get_json(force=True)
-    lid = str(body.get("lid") or "").strip()
+    gid = str(body.get("gid") or "").strip()
     label_id = str(body.get("label_id") or "").strip()
     mmsi = str(body.get("mmsi") or "").strip()
-    if not lid or not label_id or not mmsi:
-        return jsonify({"error": "請輸入 LID、選擇類別並輸入 MMSI"}), 400
+    if not gid or not label_id or not mmsi:
+        return jsonify({"error": "請輸入 GID、選擇類別並輸入 MMSI"}), 400
 
     labels = [label for label in project.get("labels", []) if not label.get("system")]
     target_label = next((label for label in labels if str(label.get("id")) == label_id), None)
@@ -1087,8 +1087,8 @@ def update_reid_lid(project_id: str):
         for annotation in annotations:
             if not isinstance(annotation, dict) or (annotation.get("mode") or annotation.get("type")) != "reid":
                 continue
-            annotation_lid = annotation.get("track_id", annotation.get("trackId"))
-            if str(annotation_lid if annotation_lid is not None else "").strip() != lid:
+            annotation_gid = annotation.get("identity_id", annotation.get("identity"))
+            if str(annotation_gid if annotation_gid is not None else "").strip() != gid:
                 continue
             matched_annotations += 1
             current_attributes = annotation.get("attributes") if isinstance(annotation.get("attributes"), dict) else {}
