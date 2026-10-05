@@ -1052,8 +1052,8 @@ def update_reid_gid(project_id: str):
     gid = str(body.get("gid") or "").strip()
     label_id = str(body.get("label_id") or "").strip()
     mmsi = str(body.get("mmsi") or "").strip()
-    if not gid or not label_id or not mmsi:
-        return jsonify({"error": "請輸入 GID、選擇類別並輸入 MMSI"}), 400
+    if not gid or not label_id:
+        return jsonify({"error": "請輸入 GID 並選擇類別"}), 400
 
     labels = [label for label in project.get("labels", []) if not label.get("system")]
     target_label = next((label for label in labels if str(label.get("id")) == label_id), None)
@@ -1063,7 +1063,7 @@ def update_reid_gid(project_id: str):
         attribute for attribute in target_label.get("attributes", [])
         if str(attribute.get("name") or attribute.get("id") or "").strip().casefold() == "mmsi"
     ), None)
-    if not mmsi_attribute:
+    if mmsi and not mmsi_attribute:
         return jsonify({"error": f"類別「{target_label.get('name', label_id)}」沒有 mmsi 屬性"}), 400
 
     mmsi_attribute_ids = {
@@ -1073,7 +1073,7 @@ def update_reid_gid(project_id: str):
         if str(attribute.get("name") or attribute.get("id") or "").strip().casefold() == "mmsi"
     }
     mmsi_attribute_ids.add("mmsi")
-    target_mmsi_attribute_id = str(mmsi_attribute.get("id"))
+    target_mmsi_attribute_id = str(mmsi_attribute.get("id")) if mmsi_attribute else None
     matched_annotations = 0
     updated_annotations = 0
     updated_images = 0
@@ -1093,7 +1093,8 @@ def update_reid_gid(project_id: str):
             matched_annotations += 1
             current_attributes = annotation.get("attributes") if isinstance(annotation.get("attributes"), dict) else {}
             next_attributes = {key: value for key, value in current_attributes.items() if str(key) not in mmsi_attribute_ids}
-            next_attributes[target_mmsi_attribute_id] = mmsi
+            if target_mmsi_attribute_id:
+                next_attributes[target_mmsi_attribute_id] = mmsi
             if str(annotation.get("label_id") or annotation.get("labelId") or "") == label_id and next_attributes == current_attributes:
                 continue
             annotation["label_id"] = label_id

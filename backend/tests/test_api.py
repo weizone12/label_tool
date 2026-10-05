@@ -358,6 +358,18 @@ class ApiTestCase(unittest.TestCase):
         self.assertEqual(untouched["label_id"], "other")
         self.assertEqual(untouched["attributes"], {source_mmsi_id: "unchanged"})
 
+        response = self.client.put(f"/api/projects/{project['id']}/reid/gid", json={
+            "gid": "gid-2", "label_id": "ship", "mmsi": "",
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json(), {
+            "matched_annotations": 1, "updated_annotations": 1, "updated_images": 1,
+        })
+        annotations = self.client.get(f"/api/projects/{project['id']}/images/{records[0]['id']}/annotation").get_json()["annotations"]
+        cleared = next(item for item in annotations if item["identity_id"] == "gid-2")
+        self.assertEqual(cleared["label_id"], "ship")
+        self.assertEqual(cleared["attributes"], {target_mmsi_id: ""})
+
     def test_only_reid_accepts_video_input(self):
         reid = self.client.post("/api/projects", json={"name": "reid video", "primaryMode": "reid", "labels": [{"id": "person", "name": "person", "color": "#ff0000"}]}).get_json()
         self.assertEqual(reid["mediaType"], "both")
