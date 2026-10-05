@@ -898,12 +898,9 @@ def normalized_annotations(items, expected_mode: str, valid_ids: set[str] | None
                 "camera_id": "cameraId",
                 "video_id": "videoId",
                 "frame_id": "frame",
-                "mmsi": "mmsi",
             }
             for field, legacy_field in legacy_names.items():
                 value = item.get(field, item.get(legacy_field, metadata.pop(field, None)))
-                if field == "mmsi" and value is not None:
-                    value = str(value).strip() or None
                 if field != "identity_id" and value == "":
                     value = None
                 annotation[field] = value
@@ -1083,7 +1080,7 @@ def download_project(project_id: str):
                             cleaned.pop("geometry", None)
                         if item.get("mode") == "reid":
                             cleaned.update({
-                                key: item.get(key) for key in ("identity_id", "track_id", "camera_id", "video_id", "frame_id", "mmsi")
+                                key: item.get(key) for key in ("identity_id", "track_id", "camera_id", "video_id", "frame_id")
                             })
                         training_annotations.append(cleaned)
                     training_data = {

@@ -409,7 +409,7 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
           return [{
             id: createId(), type: 'reid', labelId: labelIdByClass.get(detectionClass),
             points,
-            attributes: {}, identity_id: detection.identity_id ?? detection.gid ?? '', track_id: detection.track_id ?? detection.lid ?? null, camera_id: null, video_id: null, frame_id: null, mmsi: detection.mmsi == null ? '' : String(detection.mmsi),
+            attributes: {}, identity_id: detection.identity_id ?? detection.gid ?? '', track_id: detection.track_id ?? detection.lid ?? null, camera_id: null, video_id: null, frame_id: null,
             hidden: false, locked: false, keyframe: false, generated: false, created_at: now,
             source_class: detection.class ?? null, confidence: detection.confidence ?? null, source_detection_index: detectionIndex,
           }]
@@ -516,7 +516,7 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
         return [{
           id: createId(), type: 'reid', labelId: labelIdByClass.get(detectionClass),
           points,
-          attributes: {}, identity_id: detection.identity_id ?? detection.gid ?? '', track_id: detection.track_id ?? detection.lid ?? null, camera_id: null, video_id: null, frame_id: row.frame_index, mmsi: detection.mmsi == null ? '' : String(detection.mmsi),
+          attributes: {}, identity_id: detection.identity_id ?? detection.gid ?? '', track_id: detection.track_id ?? detection.lid ?? null, camera_id: null, video_id: null, frame_id: row.frame_index,
           hidden: false, locked: false, keyframe: false, generated: false, created_at: now,
           source_class: detection.class ?? null, confidence: detection.confidence ?? null, source_detection_index: detectionIndex,
         }]
@@ -550,7 +550,7 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
       ...annotation,
       ...(tool === 'reid' ? { points: fitBoxWithinBounds(annotation.points, currentImage?.width, currentImage?.height) } : {}),
       ...(currentImage?.mediaType === 'video' ? { frame_id: currentFrame, keyframe: true } : {}),
-      ...(tool === 'reid' ? { identity_id: '', track_id: null, camera_id: null, video_id: null, frame_id: currentImage?.mediaType === 'video' ? currentFrame : null, mmsi: '' } : {}),
+      ...(tool === 'reid' ? { identity_id: '', track_id: null, camera_id: null, video_id: null, frame_id: currentImage?.mediaType === 'video' ? currentFrame : null } : {}),
     }
     commit((current) => {
       const annotations = [...insertSharedVertices(current.annotations, edgeInsertions), enriched]
@@ -706,7 +706,7 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
 
   const selectionEditor = selected && <section ref={selectedEditorRef} className="selection-editor"><div className="selection-title"><span className="panel-label">選取項目</span>{!reidEditOnly && <div><button className="icon-button" title={selected.hidden ? '顯示' : '隱藏'} onClick={() => updateSelected({ hidden: !selected.hidden })}>{selected.hidden ? <EyeOff size={15} /> : <Eye size={15} />}</button><button className="icon-button" title={selected.locked ? '解鎖' : '鎖定'} onClick={() => updateSelected({ locked: !selected.locked })}>{selected.locked ? <Lock size={15} /> : <Unlock size={15} />}</button><button className="icon-button danger" onClick={deleteSelected}><Trash2 size={15} /></button></div>}</div>
     {selected.type !== 'ocr' && <label className="field small"><span>Label</span><select value={selected.labelId} onChange={(e) => updateSelected({ labelId: e.target.value })}>{project.labels.filter((label) => !label.system).map((label) => <option key={label.id} value={label.id}>{label.name}</option>)}</select></label>}
-    {selected.type === 'reid' && <><label className="field small"><span>Identity ID（GID／跨圖片身分）</span><input value={selected.identity_id || ''} onChange={(e) => updateSelected({ identity_id: e.target.value })} placeholder="例如 person_001" /></label><label className="field small"><span>Track ID（LID／同影片軌跡）</span><input value={selected.track_id || ''} onChange={(e) => updateSelected({ track_id: e.target.value })} /></label><label className="field small"><span>MMSI</span><input value={selected.mmsi || ''} onChange={(e) => updateSelected({ mmsi: e.target.value })} placeholder="例如 416035000" /></label><label className="field small"><span>Camera ID</span><input value={selected.camera_id || ''} onChange={(e) => updateSelected({ camera_id: e.target.value })} /></label><label className="field small"><span>Video ID</span><input value={selected.video_id || ''} onChange={(e) => updateSelected({ video_id: e.target.value })} /></label>{currentImage?.mediaType === 'video' && <label className="field small"><span>Frame ID</span><input value={selected.frame_id ?? ''} readOnly /></label>}{currentImage?.mediaType === 'video' && !reidEditOnly && <label className="classification-toggle"><input type="checkbox" checked={Boolean(selected.keyframe)} onChange={(e) => updateSelected({ keyframe: e.target.checked })} /><span><strong>關鍵影格</strong><small>此框為追蹤軌跡的明確標註點</small></span></label>}</>}
+    {selected.type === 'reid' && <><label className="field small"><span>Identity ID（GID／跨圖片身分）</span><input value={selected.identity_id || ''} onChange={(e) => updateSelected({ identity_id: e.target.value })} placeholder="例如 person_001" /></label><label className="field small"><span>Track ID（LID／同影片軌跡）</span><input value={selected.track_id || ''} onChange={(e) => updateSelected({ track_id: e.target.value })} /></label><label className="field small"><span>Camera ID</span><input value={selected.camera_id || ''} onChange={(e) => updateSelected({ camera_id: e.target.value })} /></label><label className="field small"><span>Video ID</span><input value={selected.video_id || ''} onChange={(e) => updateSelected({ video_id: e.target.value })} /></label>{currentImage?.mediaType === 'video' && <label className="field small"><span>Frame ID</span><input value={selected.frame_id ?? ''} readOnly /></label>}{currentImage?.mediaType === 'video' && !reidEditOnly && <label className="classification-toggle"><input type="checkbox" checked={Boolean(selected.keyframe)} onChange={(e) => updateSelected({ keyframe: e.target.checked })} /><span><strong>關鍵影格</strong><small>此框為追蹤軌跡的明確標註點</small></span></label>}</>}
     {selectedLabel?.attributes.map((attribute) => <label className="field small" key={attribute.id}><span>{attribute.name}</span><input ref={selected.type === 'ocr' && attribute.id === 'transcription' ? ocrInputRef : null} type={attribute.type === 'number' ? 'number' : 'text'} value={selected.attributes?.[attribute.id] ?? ''} onChange={(e) => updateSelected({ attributes: { ...selected.attributes, [attribute.id]: attribute.type === 'number' ? (e.target.value === '' ? null : Number(e.target.value)) : e.target.value } })} placeholder={selected.type === 'ocr' ? '輸入框內文字' : ''} /></label>)}
   </section>
 
