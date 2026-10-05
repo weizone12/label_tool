@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createId } from '../uuid'
 import { boundaryChains, insertSharedVertices, isSegmentation } from '../segmentationTopology'
+import { fitBoxWithinBounds } from '../reidGeometry'
 
 export const DEFAULT_SNAP_TOLERANCE = 10
 
@@ -348,7 +349,8 @@ export default function AnnotationCanvas({ image, imageUrl, annotations, labels,
     }
     const dx = point.x - interaction.start.x, dy = point.y - interaction.start.y
     if (Math.abs(dx) + Math.abs(dy) > 0.5) setInteraction((current) => ({ ...current, moved: true }))
-    const points = interaction.type === 'move' ? movePoints(interaction.item.points, dx, dy) : editVertex(interaction.item, interaction.vertexIndex, point)
+    const movedPoints = interaction.type === 'move' ? movePoints(interaction.item.points, dx, dy) : editVertex(interaction.item, interaction.vertexIndex, point)
+    const points = interaction.item.type === 'reid' ? fitBoxWithinBounds(movedPoints, image.width, image.height) : movedPoints
     const changes = isSegmentation(interaction.item.type)
       ? points.map((nextPoint) => ({ vertexId: nextPoint.vertexId, point: nextPoint }))
       : []
@@ -407,7 +409,7 @@ export default function AnnotationCanvas({ image, imageUrl, annotations, labels,
 }
 
 function Shape({ item, color, selected, zoom, readOnlyGeometry }) {
-  const common = { fill: color, fillOpacity: selected ? 0.24 : 0.12, stroke: color, strokeWidth: (selected ? 3 : 2) / zoom, vectorEffect: 'non-scaling-stroke', className: selected ? 'annotation-shape selected' : 'annotation-shape' }
+  const common = { fill: color, fillOpacity: selected ? 0.48 : 0.12, stroke: color, strokeWidth: (selected ? 3 : 2) / zoom, vectorEffect: 'non-scaling-stroke', className: selected ? 'annotation-shape selected' : 'annotation-shape' }
   const points = annotationPoints(item)
   const showVertices = !readOnlyGeometry && (selected || isSegmentation(item.type))
   return <g>{['rectangle', 'reid'].includes(item.type) ? <rect x={Math.min(item.points[0].x, item.points[1].x)} y={Math.min(item.points[0].y, item.points[1].y)} width={Math.abs(item.points[1].x - item.points[0].x)} height={Math.abs(item.points[1].y - item.points[0].y)} {...common} /> : <polygon points={points.map((p) => `${p.x},${p.y}`).join(' ')} {...common} />}{showVertices && points.map((point, index) => <circle key={index} cx={point.x} cy={point.y} r={4 / zoom} fill="#fff" stroke={color} strokeWidth={2 / zoom} />)}</g>

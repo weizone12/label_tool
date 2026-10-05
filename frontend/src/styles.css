@@ -169,6 +169,8 @@ h1, h2, p { margin-top: 0; }
 .selection-title { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
 .field.small { margin-bottom: 10px; gap: 5px; }
 .field.small input, .field.small select { padding: 7px 8px; font-size: 12px; }
+.mmsi-copy-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; }
+.mmsi-copy-row select { min-width: 0; }
 .shortcut-card { font-size: 11px; color: var(--muted); }
 .shortcut-card > div { display: flex; align-items: center; gap: 5px; margin-top: 7px; }
 .assignment-overlay { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; padding: 24px; background: rgba(4,10,18,.72); }

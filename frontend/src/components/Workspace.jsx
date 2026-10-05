@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ArrowLeft, Check, ChevronLeft, ChevronRight, Download, Eye, EyeOff, FolderOpen, ImagePlus, Lock, Pencil, RotateCcw, Save, Trash2, Unlock, X } from 'lucide-react'
+import { ArrowLeft, Check, ChevronLeft, ChevronRight, Copy, Download, Eye, EyeOff, FolderOpen, ImagePlus, Lock, Pencil, RotateCcw, Save, Trash2, Unlock, X } from 'lucide-react'
 import { api } from '../api'
 import AnnotationCanvas from './AnnotationCanvas'
 import { createId } from '../uuid'
 import { hydrateSegmentationTopology, insertSharedVertices, updateSharedVertices } from '../segmentationTopology'
 import { datasetFrameTime, discoverAisFiles, discoverImageBboxSets, fileDirectory, matchBboxRowsToRecords, mediaFilesFromSelection, parseAisRows, parseImageBboxRows, selectionPath } from '../reidBboxImport'
+import { fitBoxWithinBounds } from '../reidGeometry'
 
 const TOOL_NAMES = {
   rectangle: '矩形', polygon: '多邊形', ocr: 'OCR 四邊形', rotated_rectangle: '三點旋轉矩形',
@@ -44,8 +45,10 @@ const interpolateReidPoints = (before, after, ratio) => {
   return before.points.map((point, index) => ({ x: point.x + (after.points[index].x - point.x) * ratio, y: point.y + (after.points[index].y - point.y) * ratio }))
 }
 
-const regenerateReidAnnotations = (annotations) => {
-  const protectedAnnotations = annotations.filter((item) => item.type !== 'reid' || item.generated !== true)
+const regenerateReidAnnotations = (annotations, width, height) => {
+  const protectedAnnotations = annotations.filter((item) => item.type !== 'reid' || item.generated !== true).map((item) => item.type === 'reid'
+    ? { ...item, points: fitBoxWithinBounds(item.points, width, height) }
+    : item)
   const existingGenerated = new Map(annotations.filter((item) => item.type === 'reid' && item.generated === true).map((item) => [`${item.track_id}:${item.frame_id}`, item]))
   const tracks = new Map()
   protectedAnnotations.filter((item) => item.type === 'reid' && item.keyframe === true && item.track_id && Number.isInteger(item.frame_id)).forEach((item) => {
@@ -66,7 +69,7 @@ const regenerateReidAnnotations = (annotations) => {
         generated.push({
           ...before,
           id: previous?.id || createId(),
-          points: interpolateReidPoints(before, after, (frame - before.frame_id) / (after.frame_id - before.frame_id)),
+          points: fitBoxWithinBounds(interpolateReidPoints(before, after, (frame - before.frame_id) / (after.frame_id - before.frame_id)), width, height),
           frame_id: frame,
           keyframe: false,
           generated: true,
@@ -82,6 +85,22 @@ const regenerateReidAnnotations = (annotations) => {
 
 const annotationsAtFrame = (annotations, frame) => annotations.filter((item) => item.frame_id === frame)
 const mediaDisplayPath = (item) => String(item.relativePath || item.originalFilename || item.filename || '').replaceAll('\\', '/')
+const copyText = async (value) => {
+  try {
+    if (!window.navigator.clipboard?.writeText) throw new Error('Clipboard API unavailable')
+    await window.navigator.clipboard.writeText(value)
+    return
+  } catch { /* Use the fallback below for non-HTTPS LAN access. */ }
+  const textarea = window.document.createElement('textarea')
+  textarea.value = value
+  textarea.style.position = 'fixed'
+  textarea.style.opacity = '0'
+  window.document.body.appendChild(textarea)
+  textarea.select()
+  const copied = window.document.execCommand('copy')
+  textarea.remove()
+  if (!copied) throw new Error('瀏覽器不允許複製，請手動選取 MMSI')
+}
 
 export default function Workspace({ project: initialProject, isAdmin, onExit }) {
   const [project, setProject] = useState(initialProject)
@@ -112,6 +131,7 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
   const [importingBboxes, setImportingBboxes] = useState(false)
   const [aisRecords, setAisRecords] = useState([])
   const [selectedMmsi, setSelectedMmsi] = useState('')
+  const [copiedMmsi, setCopiedMmsi] = useState('')
   const [aisSourceName, setAisSourceName] = useState('')
   
   // 👇 新增：上傳狀態與進度
@@ -128,6 +148,8 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
   const fileInputRef = useRef(null)
   const folderInputRef = useRef(null)
   const bboxInputRef = useRef(null)
+  const selectedEditorRef = useRef(null)
+  const mmsiCopyTimerRef = useRef(null)
   const filteredImages = images.filter((item) => progressFilter === 'all' || (progressFilter === 'completed' ? item.completed : !item.completed))
   const currentImage = filteredImages[index] || filteredImages[0]
   const nextImageToPreload = filteredImages[index + 1]
@@ -174,7 +196,7 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
     fetchAnnotation(currentImage.id).then((data) => {
       if (cancelled) return
       annotationCacheRef.current.delete(currentImage.id)
-      const sourceAnnotations = project.primaryMode === 'reid' && currentImage.mediaType === 'video' ? regenerateReidAnnotations(data.annotations) : data.annotations
+      const sourceAnnotations = project.primaryMode === 'reid' ? regenerateReidAnnotations(data.annotations, currentImage.width, currentImage.height) : data.annotations
       const annotations = hydrateSegmentationTopology(sourceAnnotations)
       const materialized = { ...data, annotations }
       const restoredAisRecords = Array.isArray(data.editor_state?.mmsi_records) ? data.editor_state.mmsi_records : []
@@ -187,7 +209,7 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
       }
     }).catch((err) => setError(err.message))
     return () => { cancelled = true }
-  }, [fetchAnnotation, project.id, project.primaryMode, currentImage?.id, currentImage?.mediaType])
+  }, [fetchAnnotation, project.id, project.primaryMode, currentImage?.id, currentImage?.mediaType, currentImage?.width, currentImage?.height])
 
   const save = useCallback(async (payload = document) => {
     if (!currentImage) return null
@@ -239,10 +261,10 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
     if (!selectedId || editingProject) return
     commit((current) => {
       const annotations = current.annotations.filter((item) => item.id !== selectedId)
-      return { ...current, annotations: tool === 'reid' ? regenerateReidAnnotations(annotations) : annotations }
+      return { ...current, annotations: tool === 'reid' ? regenerateReidAnnotations(annotations, currentImage?.width, currentImage?.height) : annotations }
     })
     setSelectedId(null)
-  }, [commit, editingProject, selectedId, tool])
+  }, [commit, currentImage?.height, currentImage?.width, editingProject, selectedId, tool])
 
   const navigate = useCallback((delta) => {
     if (!filteredImages.length) return
@@ -295,12 +317,18 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
     const annotations = current.annotations.map((item) => item.id === selectedId
       ? { ...item, ...patch, ...(item.type === 'reid' && item.generated === true ? { keyframe: true, generated: false } : {}) }
       : item)
-    return { ...current, annotations: tool === 'reid' ? regenerateReidAnnotations(annotations) : annotations }
+    return { ...current, annotations: tool === 'reid' ? regenerateReidAnnotations(annotations, currentImage?.width, currentImage?.height) : annotations }
   })
 
   useEffect(() => {
     if (selected?.type === 'ocr') setTimeout(() => ocrInputRef.current?.focus(), 0)
   }, [selectedId, selected?.type])
+
+  useEffect(() => {
+    if (!selected) return
+    setActiveLabelId(selected.labelId)
+    window.requestAnimationFrame(() => selectedEditorRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }))
+  }, [selectedId, selected?.labelId])
 
   const importImageBboxSets = async (bboxSets, aisFiles, uploadedRecords) => {
     if (!bboxSets.length) return
@@ -372,9 +400,14 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
           if (!validDetection(detection)) return []
           const [x, y, width, height] = detection.bbox_xywh.map(Number)
           const detectionClass = String(detection.class ?? '').trim() || '未分類'
+          const points = fitBoxWithinBounds(
+            [{ x: x * scaleX, y: y * scaleY }, { x: (x + width) * scaleX, y: (y + height) * scaleY }],
+            record.width,
+            record.height,
+          )
           return [{
             id: createId(), type: 'reid', labelId: labelIdByClass.get(detectionClass),
-            points: [{ x: x * scaleX, y: y * scaleY }, { x: (x + width) * scaleX, y: (y + height) * scaleY }],
+            points,
             attributes: {}, identity_id: '', track_id: null, camera_id: null, video_id: null, frame_id: null,
             hidden: false, locked: false, keyframe: false, generated: false, created_at: now,
             source_class: detection.class ?? null, confidence: detection.confidence ?? null, source_detection_index: detectionIndex,
@@ -474,9 +507,14 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
         const [x, y, width, height] = detection.bbox_xywh.map(Number)
         if (![x, y, width, height].every(Number.isFinite) || width <= 0 || height <= 0) return []
         const detectionClass = String(detection.class ?? '').trim() || '未分類'
+        const points = fitBoxWithinBounds(
+          [{ x: x * scaleX, y: y * scaleY }, { x: (x + width) * scaleX, y: (y + height) * scaleY }],
+          currentImage.width,
+          currentImage.height,
+        )
         return [{
           id: createId(), type: 'reid', labelId: labelIdByClass.get(detectionClass),
-          points: [{ x: x * scaleX, y: y * scaleY }, { x: (x + width) * scaleX, y: (y + height) * scaleY }],
+          points,
           attributes: {}, identity_id: '', track_id: null, camera_id: null, video_id: null, frame_id: row.frame_index,
           hidden: false, locked: false, keyframe: false, generated: false, created_at: now,
           source_class: detection.class ?? null, confidence: detection.confidence ?? null, source_detection_index: detectionIndex,
@@ -509,22 +547,24 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
   const handleCanvasCommit = (annotation, edgeInsertions = []) => {
     const enriched = {
       ...annotation,
+      ...(tool === 'reid' ? { points: fitBoxWithinBounds(annotation.points, currentImage?.width, currentImage?.height) } : {}),
       ...(currentImage?.mediaType === 'video' ? { frame_id: currentFrame, keyframe: true } : {}),
       ...(tool === 'reid' ? { identity_id: '', track_id: null, camera_id: null, video_id: null, frame_id: currentImage?.mediaType === 'video' ? currentFrame : null } : {}),
     }
     commit((current) => {
       const annotations = [...insertSharedVertices(current.annotations, edgeInsertions), enriched]
-      return { ...current, annotations: tool === 'reid' ? regenerateReidAnnotations(annotations) : annotations }
+      return { ...current, annotations: tool === 'reid' ? regenerateReidAnnotations(annotations, currentImage?.width, currentImage?.height) : annotations }
     })
     setSelectedId(enriched.id)
   }
 
   const handleCanvasUpdate = (id, points, topologyChanges) => commit((current) => {
-    const annotations = updateSharedVertices(current.annotations, id, points, topologyChanges)
+    const boundedPoints = tool === 'reid' ? fitBoxWithinBounds(points, currentImage?.width, currentImage?.height) : points
+    const annotations = updateSharedVertices(current.annotations, id, boundedPoints, topologyChanges)
     const marked = annotations.map((item) => item.id === id && item.type === 'reid' && item.generated === true
       ? { ...item, keyframe: true, generated: false }
       : item)
-    return { ...current, annotations: tool === 'reid' ? regenerateReidAnnotations(marked) : marked }
+    return { ...current, annotations: tool === 'reid' ? regenerateReidAnnotations(marked, currentImage?.width, currentImage?.height) : marked }
   })
 
   const classificationLabels = project.labels.filter((label) => !label.system)
@@ -653,7 +693,17 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
     setImages((items) => items.map((item) => item.id === currentImage.id ? { ...item, completed: next.completed } : item))
   }
 
-  const selectionEditor = selected && <section className="selection-editor"><div className="selection-title"><span className="panel-label">選取項目</span>{!reidEditOnly && <div><button className="icon-button" title={selected.hidden ? '顯示' : '隱藏'} onClick={() => updateSelected({ hidden: !selected.hidden })}>{selected.hidden ? <EyeOff size={15} /> : <Eye size={15} />}</button><button className="icon-button" title={selected.locked ? '解鎖' : '鎖定'} onClick={() => updateSelected({ locked: !selected.locked })}>{selected.locked ? <Lock size={15} /> : <Unlock size={15} />}</button><button className="icon-button danger" onClick={deleteSelected}><Trash2 size={15} /></button></div>}</div>
+  const copySelectedMmsi = async () => {
+    if (!selectedMmsi) return
+    try {
+      await copyText(selectedMmsi)
+      setCopiedMmsi(selectedMmsi)
+      window.clearTimeout(mmsiCopyTimerRef.current)
+      mmsiCopyTimerRef.current = window.setTimeout(() => setCopiedMmsi(''), 1600)
+    } catch (err) { setError(err.message) }
+  }
+
+  const selectionEditor = selected && <section ref={selectedEditorRef} className="selection-editor"><div className="selection-title"><span className="panel-label">選取項目</span>{!reidEditOnly && <div><button className="icon-button" title={selected.hidden ? '顯示' : '隱藏'} onClick={() => updateSelected({ hidden: !selected.hidden })}>{selected.hidden ? <EyeOff size={15} /> : <Eye size={15} />}</button><button className="icon-button" title={selected.locked ? '解鎖' : '鎖定'} onClick={() => updateSelected({ locked: !selected.locked })}>{selected.locked ? <Lock size={15} /> : <Unlock size={15} />}</button><button className="icon-button danger" onClick={deleteSelected}><Trash2 size={15} /></button></div>}</div>
     {selected.type !== 'ocr' && <label className="field small"><span>Label</span><select value={selected.labelId} onChange={(e) => updateSelected({ labelId: e.target.value })}>{project.labels.filter((label) => !label.system).map((label) => <option key={label.id} value={label.id}>{label.name}</option>)}</select></label>}
     {selected.type === 'reid' && <><label className="field small"><span>Identity ID（跨圖片身分）</span><input value={selected.identity_id || ''} onChange={(e) => updateSelected({ identity_id: e.target.value })} placeholder="例如 person_001" /></label><label className="field small"><span>Track ID（同影片軌跡）</span><input value={selected.track_id || ''} onChange={(e) => updateSelected({ track_id: e.target.value })} /></label><label className="field small"><span>Camera ID</span><input value={selected.camera_id || ''} onChange={(e) => updateSelected({ camera_id: e.target.value })} /></label><label className="field small"><span>Video ID</span><input value={selected.video_id || ''} onChange={(e) => updateSelected({ video_id: e.target.value })} /></label>{currentImage?.mediaType === 'video' && <label className="field small"><span>Frame ID</span><input value={selected.frame_id ?? ''} readOnly /></label>}{currentImage?.mediaType === 'video' && !reidEditOnly && <label className="classification-toggle"><input type="checkbox" checked={Boolean(selected.keyframe)} onChange={(e) => updateSelected({ keyframe: e.target.checked })} /><span><strong>關鍵影格</strong><small>此框為追蹤軌跡的明確標註點</small></span></label>}</>}
     {selectedLabel?.attributes.map((attribute) => <label className="field small" key={attribute.id}><span>{attribute.name}</span><input ref={selected.type === 'ocr' && attribute.id === 'transcription' ? ocrInputRef : null} type={attribute.type === 'number' ? 'number' : 'text'} value={selected.attributes?.[attribute.id] ?? ''} onChange={(e) => updateSelected({ attributes: { ...selected.attributes, [attribute.id]: attribute.type === 'number' ? (e.target.value === '' ? null : Number(e.target.value)) : e.target.value } })} placeholder={selected.type === 'ocr' ? '輸入框內文字' : ''} /></label>)}
@@ -706,7 +756,7 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
           <footer className="image-nav"><button onClick={() => navigate(-1)} disabled={index === 0}><ChevronLeft size={18} />上一張</button><div className="progress-track"><span style={{ width: images.length ? `${((index + 1) / images.length) * 100}%` : '0%' }} /></div><button onClick={() => navigate(1)} disabled={index >= images.length - 1}>下一張<ChevronRight size={18} /></button></footer>
         </section>
         <aside className="inspector-panel">
-          {reidEditOnly && aisRecords.length > 0 && <section><span className="panel-label">MMSI 座標{aisSourceName ? ` · ${aisSourceName}` : ''}</span><label className="field small"><span>選擇 MMSI</span><select value={selectedMmsi} onChange={(event) => setSelectedMmsi(event.target.value)}>{mmsiOptions.map((mmsi) => <option key={mmsi} value={mmsi}>{mmsi}</option>)}</select></label></section>}
+          {reidEditOnly && aisRecords.length > 0 && <section><span className="panel-label">MMSI 座標{aisSourceName ? ` · ${aisSourceName}` : ''}</span><label className="field small"><span>選擇 MMSI</span><div className="mmsi-copy-row"><select value={selectedMmsi} onChange={(event) => { setSelectedMmsi(event.target.value); setCopiedMmsi('') }}>{mmsiOptions.map((mmsi) => <option key={mmsi} value={mmsi}>{mmsi}</option>)}</select><button type="button" className="secondary-button compact" onClick={copySelectedMmsi} disabled={!selectedMmsi}>{copiedMmsi === selectedMmsi ? <Check size={14} /> : <Copy size={14} />}{copiedMmsi === selectedMmsi ? '已複製' : '複製'}</button></div></label></section>}
           {tool !== 'ocr' && <section><span className="panel-label">目前 LABEL</span><div className="label-picker">{project.labels.filter((label) => !label.system).map((label) => <div className="label-picker-row" key={label.id}>{editingLabelId === label.id ? <><input autoFocus value={editingLabelName} onChange={(event) => setEditingLabelName(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') renameLabel(); if (event.key === 'Escape') setEditingLabelId(null) }} /><button className="label-row-action confirm" title="儲存名稱" onClick={renameLabel} disabled={!editingLabelName.trim() || renamingLabel}><Check size={14} /></button><button className="label-row-action" title="取消" onClick={() => setEditingLabelId(null)}><X size={14} /></button></> : <><button className={`label-choice ${activeLabelId === label.id ? 'active' : ''}`} onClick={() => setActiveLabelId(label.id)}><i style={{ background: label.color }} />{label.name}</button>{isAdmin && <button className="label-row-action" title="修改名稱" onClick={() => { setEditingLabelId(label.id); setEditingLabelName(label.name) }}><Pencil size={14} /></button>}{isAdmin && <button className="label-row-action danger" title="刪除未使用的 label" onClick={() => deleteLabel(label)} disabled={Boolean(deletingDefinition)}><Trash2 size={14} /></button>}</>}</div>)}</div>{isAdmin && <div className="label-add-row"><input value={newLabelName} onChange={(event) => setNewLabelName(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') addLabel() }} placeholder="輸入 label 名稱" /><button onClick={addLabel} disabled={!newLabelName.trim() || addingLabel}>{addingLabel ? '新增中…' : '新增'}</button></div>}</section>}
           {isAdmin && tool !== 'ocr' && tool !== 'classification' && activeLabel && <section><span className="panel-label">新增屬性 · {activeLabel.name}</span>{(activeLabel.attributes || []).length > 0 && <div className="attribute-summary">{activeLabel.attributes.map((attribute) => <span key={attribute.id}>{attribute.name}<small>{attribute.type === 'number' ? 'Number' : 'Text'}</small><button title="刪除未使用的屬性" onClick={() => deleteAttribute(attribute)} disabled={Boolean(deletingDefinition)}><X size={12} /></button></span>)}</div>}<div className="attribute-add-row"><input value={newAttributeName} onChange={(event) => setNewAttributeName(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') addAttribute() }} placeholder="屬性名稱" /><select value={newAttributeType} onChange={(event) => setNewAttributeType(event.target.value)}><option value="text">Text</option><option value="number">Number</option></select><button onClick={addAttribute} disabled={!newAttributeName.trim() || addingAttribute}>{addingAttribute ? '新增中…' : '新增'}</button></div></section>}
           {project.primaryMode === 'classification' && <section><span className="panel-label">圖片分類</span><div className="classification-list">{classificationLabels.map((label) => <label key={label.id}><input type={project.classificationMode === 'single' ? 'radio' : 'checkbox'} checked={document.classifications.some((item) => item.label_id === label.id)} onChange={() => toggleClassification(label.id)} /><i style={{ background: label.color }} />{label.name}</label>)}</div></section>}
