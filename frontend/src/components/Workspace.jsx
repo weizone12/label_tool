@@ -14,6 +14,7 @@ const TOOL_NAMES = {
 const LABEL_COLORS = ['#fb7185', '#f59e0b', '#84cc16', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6', '#ec4899']
 
 const classLabelId = (name, index) => name.trim().toLocaleLowerCase().replace(/[^\p{L}\p{N}_-]+/gu, '-').replace(/^[-_]+|[-_]+$/g, '') || `class-${index + 1}`
+const mmsiAttributeForLabel = (label) => label?.attributes?.find((attribute) => String(attribute.name || attribute.id || '').trim().toLocaleLowerCase() === 'mmsi')
 
 const classColor = (index, total) => {
   const hue = (index * 360 / Math.max(1, total)) % 360
@@ -134,6 +135,12 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
   const [copiedMmsi, setCopiedMmsi] = useState('')
   const [aisSourceName, setAisSourceName] = useState('')
   const [showReidInfo, setShowReidInfo] = useState(true)
+  const [sharedCameraId, setSharedCameraId] = useState('')
+  const [batchLid, setBatchLid] = useState('')
+  const [batchLidMmsi, setBatchLidMmsi] = useState('')
+  const [batchLidLabelId, setBatchLidLabelId] = useState(project.labels.find((label) => !label.system)?.id || '')
+  const [applyingLid, setApplyingLid] = useState(false)
+  const [batchLidResult, setBatchLidResult] = useState('')
   
   // 👇 新增：上傳狀態與進度
   const [uploading, setUploading] = useState(false)
@@ -167,6 +174,10 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
   }, [project.id])
 
   useEffect(() => { annotationCacheRef.current.clear() }, [project.id])
+  useEffect(() => {
+    if (tool !== 'reid' || project.labels.some((label) => !label.system && label.id === batchLidLabelId)) return
+    setBatchLidLabelId(project.labels.find((label) => !label.system)?.id || '')
+  }, [batchLidLabelId, project.labels, tool])
 
   useEffect(() => {
     if (!nextImageToPreload) return
@@ -550,7 +561,7 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
       ...annotation,
       ...(tool === 'reid' ? { points: fitBoxWithinBounds(annotation.points, currentImage?.width, currentImage?.height) } : {}),
       ...(currentImage?.mediaType === 'video' ? { frame_id: currentFrame, keyframe: true } : {}),
-      ...(tool === 'reid' ? { identity_id: '', track_id: null, camera_id: null, video_id: null, frame_id: currentImage?.mediaType === 'video' ? currentFrame : null } : {}),
+      ...(tool === 'reid' ? { identity_id: '', track_id: null, camera_id: sharedCameraId.trim() || null, video_id: null, frame_id: currentImage?.mediaType === 'video' ? currentFrame : null } : {}),
     }
     commit((current) => {
       const annotations = [...insertSharedVertices(current.annotations, edgeInsertions), enriched]
@@ -573,12 +584,62 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
   const visibleAnnotations = currentImage?.mediaType === 'video' ? annotationsAtFrame(document.annotations, currentFrame) : document.annotations
   const reidEditOnly = editingProject && tool === 'reid'
   const frameTimeline = reidEditOnly ? (document.editor_state?.frame_timeline || []) : []
+  const reidAnnotations = document.annotations.filter((item) => item.type === 'reid')
+  const cameraIdValues = [...new Set(reidAnnotations.map((item) => String(item.camera_id ?? '').trim()))]
+  const hasMixedCameraIds = cameraIdValues.length > 1
+  const batchLidLabel = project.labels.find((label) => !label.system && label.id === batchLidLabelId)
+  const batchLidMmsiAttribute = mmsiAttributeForLabel(batchLidLabel)
   const mmsiOptions = [...new Set(aisRecords.map((item) => item.mmsi))].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
   const aisOverlayPoints = reidEditOnly && selectedMmsi
     ? aisRecords.filter((item) => item.mmsi === selectedMmsi).map((item) => currentImage?.mediaType === 'video' && videoMetadata
       ? { ...item, x: item.x * currentImage.width / videoMetadata.width, y: item.y * currentImage.height / videoMetadata.height }
       : item)
     : []
+
+  useEffect(() => {
+    const values = [...new Set(document.annotations.filter((item) => item.type === 'reid').map((item) => String(item.camera_id ?? '').trim()))]
+    setSharedCameraId(values.length === 1 ? values[0] : '')
+  }, [currentImage?.id, document.annotations])
+
+  const applySharedCameraId = () => {
+    const cameraId = sharedCameraId.trim()
+    if (!cameraId || !reidAnnotations.length) return
+    commit((current) => ({
+      ...current,
+      annotations: current.annotations.map((item) => item.type === 'reid' ? { ...item, camera_id: cameraId } : item),
+    }))
+  }
+
+  const applyLidDetails = async () => {
+    const lid = batchLid.trim()
+    const mmsi = batchLidMmsi.trim()
+    if (!lid || !mmsi || !batchLidLabel || !batchLidMmsiAttribute || applyingLid) return
+    if (!window.confirm(`確定將專案內所有 LID「${lid}」的 bbox 類別改為「${batchLidLabel.name}」，MMSI 改為「${mmsi}」？\n\n這是跨圖片操作，無法使用 Ctrl+Z 復原。`)) return
+    setApplyingLid(true)
+    setBatchLidResult('')
+    setError('')
+    try {
+      if (currentImage && !(await save())) return
+      const result = await api.updateReidByLid(project.id, { lid, label_id: batchLidLabel.id, mmsi })
+      if (result.matched_annotations === 0) setBatchLidResult(`專案內找不到 LID「${lid}」的 bbox。`)
+      else if (result.updated_annotations === 0) setBatchLidResult(`找到 ${result.matched_annotations} 個 bbox，資料原本已一致。`)
+      else setBatchLidResult(`已更新 ${result.updated_annotations} 個 bbox，共 ${result.updated_images} 張資料。`)
+      if (result.updated_annotations > 0 && currentImage) {
+        annotationCacheRef.current.clear()
+        const data = await fetchAnnotation(currentImage.id)
+        const sourceAnnotations = regenerateReidAnnotations(data.annotations, currentImage.width, currentImage.height)
+        setDocument({ ...data, annotations: hydrateSegmentationTopology(sourceAnnotations) })
+        setPast([])
+        setFuture([])
+        setSelectedId(null)
+        setSaveState('已儲存')
+      }
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setApplyingLid(false)
+    }
+  }
 
   const addLabel = async () => {
     const name = newLabelName.trim()
@@ -758,6 +819,8 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
           <footer className="image-nav"><button onClick={() => navigate(-1)} disabled={index === 0}><ChevronLeft size={18} />上一張</button><div className="progress-track"><span style={{ width: images.length ? `${((index + 1) / images.length) * 100}%` : '0%' }} /></div><button onClick={() => navigate(1)} disabled={index >= images.length - 1}>下一張<ChevronRight size={18} /></button></footer>
         </section>
         <aside className="inspector-panel">
+          {tool === 'reid' && currentImage && <section><span className="panel-label">{currentImage.mediaType === 'video' ? '本段影片' : '本張圖片'} CAMERA ID</span><div className="camera-id-row"><input value={sharedCameraId} onChange={(event) => setSharedCameraId(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') applySharedCameraId() }} placeholder={hasMixedCameraIds ? '目前有多個值' : '輸入 Camera ID'} /><button type="button" onClick={applySharedCameraId} disabled={!sharedCameraId.trim() || !reidAnnotations.length}>套用全部</button></div><small className="field-hint">套用到此{currentImage.mediaType === 'video' ? '影片' : '圖片'}的 {reidAnnotations.length} 個 bbox，可使用復原還原。</small></section>}
+          {tool === 'reid' && <section><span className="panel-label">LID 批次套用</span><div className="lid-bulk-form"><label className="field small"><span>LID</span><input value={batchLid} onChange={(event) => { setBatchLid(event.target.value); setBatchLidResult('') }} placeholder="輸入要統一的 LID" /></label><label className="field small"><span>類別</span><select value={batchLidLabelId} onChange={(event) => { setBatchLidLabelId(event.target.value); setBatchLidResult('') }}>{project.labels.filter((label) => !label.system).map((label) => <option key={label.id} value={label.id}>{label.name}</option>)}</select></label><label className="field small"><span>MMSI</span><input value={batchLidMmsi} onChange={(event) => { setBatchLidMmsi(event.target.value); setBatchLidResult('') }} placeholder="輸入 MMSI" /></label><button type="button" className="secondary-button compact lid-apply-button" onClick={applyLidDetails} disabled={applyingLid || !batchLid.trim() || !batchLidMmsi.trim() || !batchLidLabel || !batchLidMmsiAttribute}>{applyingLid ? '套用中…' : '套用到整個專案'}</button></div>{batchLidLabel && !batchLidMmsiAttribute && <small className="field-hint warning">類別「{batchLidLabel.name}」沒有手動建立的 mmsi 屬性，無法套用。</small>}<small className="field-hint">會更新整個專案內相同 LID 的 bbox 類別與 MMSI。</small>{batchLidResult && <div className="batch-result">{batchLidResult}</div>}</section>}
           {reidEditOnly && aisRecords.length > 0 && <section><span className="panel-label">MMSI 座標{aisSourceName ? ` · ${aisSourceName}` : ''}</span><label className="field small"><span>選擇 MMSI</span><div className="mmsi-copy-row"><select value={selectedMmsi} onChange={(event) => { setSelectedMmsi(event.target.value); setCopiedMmsi('') }}>{mmsiOptions.map((mmsi) => <option key={mmsi} value={mmsi}>{mmsi}</option>)}</select><button type="button" className="secondary-button compact" onClick={copySelectedMmsi} disabled={!selectedMmsi}>{copiedMmsi === selectedMmsi ? <Check size={14} /> : <Copy size={14} />}{copiedMmsi === selectedMmsi ? '已複製' : '複製'}</button></div></label></section>}
           {tool !== 'ocr' && <section><span className="panel-label">目前 LABEL</span><div className="label-picker">{project.labels.filter((label) => !label.system).map((label) => <div className="label-picker-row" key={label.id}>{editingLabelId === label.id ? <><input autoFocus value={editingLabelName} onChange={(event) => setEditingLabelName(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') renameLabel(); if (event.key === 'Escape') setEditingLabelId(null) }} /><button className="label-row-action confirm" title="儲存名稱" onClick={renameLabel} disabled={!editingLabelName.trim() || renamingLabel}><Check size={14} /></button><button className="label-row-action" title="取消" onClick={() => setEditingLabelId(null)}><X size={14} /></button></> : <><button className={`label-choice ${activeLabelId === label.id ? 'active' : ''}`} onClick={() => setActiveLabelId(label.id)}><i style={{ background: label.color }} />{label.name}</button>{isAdmin && <button className="label-row-action" title="修改名稱" onClick={() => { setEditingLabelId(label.id); setEditingLabelName(label.name) }}><Pencil size={14} /></button>}{isAdmin && <button className="label-row-action danger" title="刪除未使用的 label" onClick={() => deleteLabel(label)} disabled={Boolean(deletingDefinition)}><Trash2 size={14} /></button>}</>}</div>)}</div>{isAdmin && <div className="label-add-row"><input value={newLabelName} onChange={(event) => setNewLabelName(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') addLabel() }} placeholder="輸入 label 名稱" /><button onClick={addLabel} disabled={!newLabelName.trim() || addingLabel}>{addingLabel ? '新增中…' : '新增'}</button></div>}</section>}
           {isAdmin && tool !== 'ocr' && tool !== 'classification' && activeLabel && <section><span className="panel-label">新增屬性 · {activeLabel.name}</span>{(activeLabel.attributes || []).length > 0 && <div className="attribute-summary">{activeLabel.attributes.map((attribute) => <span key={attribute.id}>{attribute.name}<small>{attribute.type === 'number' ? 'Number' : 'Text'}</small><button title="刪除未使用的屬性" onClick={() => deleteAttribute(attribute)} disabled={Boolean(deletingDefinition)}><X size={12} /></button></span>)}</div>}<div className="attribute-add-row"><input value={newAttributeName} onChange={(event) => setNewAttributeName(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') addAttribute() }} placeholder="屬性名稱" /><select value={newAttributeType} onChange={(event) => setNewAttributeType(event.target.value)}><option value="text">Text</option><option value="number">Number</option></select><button onClick={addAttribute} disabled={!newAttributeName.trim() || addingAttribute}>{addingAttribute ? '新增中…' : '新增'}</button></div></section>}

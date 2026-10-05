@@ -131,6 +131,34 @@ class ApiTestCase(unittest.TestCase):
             self.assertEqual(len(dataset["samples"]), 1)
             self.assertEqual(dataset["samples"][0]["annotations"][1]["bbox"], [8, 2, 6, 5])
 
+    def test_project_list_reports_completion_progress(self):
+        project = self.client.post("/api/projects", json={
+            "name": "完成進度專案", "primaryMode": "rectangle",
+            "labels": [{"id": "item", "name": "物件", "color": "#ff0000", "attributes": []}],
+        }).get_json()
+        empty = next(item for item in self.client.get("/api/projects").get_json() if item["id"] == project["id"])
+        self.assertEqual((empty["completedCount"], empty["pendingCount"], empty["completed"]), (0, 0, False))
+
+        source_dir = Path(self.temp_dir.name) / "completion-source"
+        source_dir.mkdir()
+        sources = []
+        for filename in ("one.png", "two.png"):
+            source = source_dir / filename
+            Image.new("RGB", (20, 10), "white").save(source)
+            sources.append(source)
+        records = self.app_module.register_source_images(self.app_module.project_dir(project["id"]), sources, source_dir)
+
+        for index, record in enumerate(records):
+            response = self.client.put(f"/api/projects/{project['id']}/images/{record['id']}/annotation", json={
+                "annotations": [], "classifications": [], "completed": True, "revision": 0,
+            })
+            self.assertEqual(response.status_code, 200)
+            listed = next(item for item in self.client.get("/api/projects").get_json() if item["id"] == project["id"])
+            expected_completed = index + 1
+            self.assertEqual(listed["completedCount"], expected_completed)
+            self.assertEqual(listed["pendingCount"], 2 - expected_completed)
+            self.assertEqual(listed["completed"], expected_completed == 2)
+
     def test_ocr_project_gets_internal_text_label(self):
         response = self.client.post("/api/projects", json={
             "name": "OCR 專案", "primaryMode": "ocr", "labels": [],
@@ -272,6 +300,63 @@ class ApiTestCase(unittest.TestCase):
         self.assertEqual(bulk.get_json()["saved"], 1)
         stored = self.client.get(f"/api/projects/{project['id']}/images/{image['id']}/annotation").get_json()
         self.assertEqual(stored["editor_state"]["bbox_source_name"], "pure editing_bbox.jsonl")
+
+    def test_reid_lid_batch_update_changes_label_and_mmsi_across_images(self):
+        source_mmsi_id = str(uuid.uuid4())
+        target_mmsi_id = str(uuid.uuid4())
+        project = self.client.post("/api/projects", json={
+            "name": "ReID LID batch", "primaryMode": "reid", "labels": [
+                {"id": "other", "name": "Other", "color": "#ff0000", "attributes": [
+                    {"id": source_mmsi_id, "name": "mmsi", "type": "text"},
+                ]},
+                {"id": "ship", "name": "Ship", "color": "#00ff00", "attributes": [
+                    {"id": target_mmsi_id, "name": "MMSI", "type": "text"},
+                ]},
+            ],
+        }).get_json()
+        source_dir = Path(self.temp_dir.name) / "reid-lid-source"
+        source_dir.mkdir()
+        sources = []
+        for filename in ("one.png", "two.png"):
+            source = source_dir / filename
+            Image.new("RGB", (100, 60), "white").save(source)
+            sources.append(source)
+        records = self.app_module.register_source_images(self.app_module.project_dir(project["id"]), sources, source_dir)
+
+        for image_index, record in enumerate(records):
+            annotations = [{
+                "id": str(uuid.uuid4()), "mode": "reid", "label_id": "other",
+                "geometry": {"x": 1, "y": 2, "width": 20, "height": 10},
+                "attributes": {source_mmsi_id: f"old-{image_index}"},
+                "identity_id": "gid-1", "track_id": 7,
+            }]
+            if image_index == 0:
+                annotations.append({
+                    "id": str(uuid.uuid4()), "mode": "reid", "label_id": "other",
+                    "geometry": {"x": 30, "y": 2, "width": 20, "height": 10},
+                    "attributes": {source_mmsi_id: "unchanged"},
+                    "identity_id": "gid-2", "track_id": 8,
+                })
+            response = self.client.put(f"/api/projects/{project['id']}/images/{record['id']}/annotation", json={
+                "annotations": annotations, "classifications": [], "revision": 0,
+            })
+            self.assertEqual(response.status_code, 200)
+
+        response = self.client.put(f"/api/projects/{project['id']}/reid/lid", json={
+            "lid": "7", "label_id": "ship", "mmsi": "416035000",
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json(), {
+            "matched_annotations": 2, "updated_annotations": 2, "updated_images": 2,
+        })
+        for record in records:
+            annotations = self.client.get(f"/api/projects/{project['id']}/images/{record['id']}/annotation").get_json()["annotations"]
+            updated = next(item for item in annotations if str(item["track_id"]) == "7")
+            self.assertEqual(updated["label_id"], "ship")
+            self.assertEqual(updated["attributes"], {target_mmsi_id: "416035000"})
+        untouched = self.client.get(f"/api/projects/{project['id']}/images/{records[0]['id']}/annotation").get_json()["annotations"][1]
+        self.assertEqual(untouched["label_id"], "other")
+        self.assertEqual(untouched["attributes"], {source_mmsi_id: "unchanged"})
 
     def test_only_reid_accepts_video_input(self):
         reid = self.client.post("/api/projects", json={"name": "reid video", "primaryMode": "reid", "labels": [{"id": "person", "name": "person", "color": "#ff0000"}]}).get_json()

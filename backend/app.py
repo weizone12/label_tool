@@ -525,7 +525,24 @@ def list_projects():
     for config_path in PROJECTS_DIR.glob("*/project.json"):
         config = read_json(config_path, {})
         if config:
-            projects.append(normalize_project(config, config_path.parent))
+            project = normalize_project(config, config_path.parent)
+            try:
+                image_count = max(0, int(project.get("imageCount", 0)))
+            except (TypeError, ValueError):
+                image_count = 0
+            image_ids = set(image_metadata(config_path.parent))
+            annotation_paths = (
+                [config_path.parent / "annotations" / f"{image_id}.json" for image_id in image_ids]
+                if image_ids else list((config_path.parent / "annotations").glob("*.json"))
+            )
+            completed_count = min(image_count, sum(
+                1 for annotation_path in annotation_paths
+                if bool(read_json(annotation_path, {}).get("completed", False))
+            ))
+            project["completedCount"] = completed_count
+            project["pendingCount"] = max(0, image_count - completed_count)
+            project["completed"] = image_count > 0 and completed_count == image_count
+            projects.append(project)
     if not app.config.get("AUTH_DISABLED_FOR_TESTS") and not g.current_user.get("is_admin"):
         allowed = assigned_project_ids(g.current_user["id"])
         projects = [project for project in projects if project.get("id") in allowed]
@@ -1022,6 +1039,78 @@ def save_annotations_bulk(project_id: str):
         write_json_atomic(path, payload)
         saved += 1
     return jsonify({"saved": saved})
+
+
+@app.put("/api/projects/<project_id>/reid/lid")
+def update_reid_lid(project_id: str):
+    directory = project_dir(project_id)
+    project = load_project(project_id)
+    if project.get("primaryMode") != "reid":
+        return jsonify({"error": "LID 批次套用僅支援 ReID 專案"}), 400
+
+    body = request.get_json(force=True)
+    lid = str(body.get("lid") or "").strip()
+    label_id = str(body.get("label_id") or "").strip()
+    mmsi = str(body.get("mmsi") or "").strip()
+    if not lid or not label_id or not mmsi:
+        return jsonify({"error": "請輸入 LID、選擇類別並輸入 MMSI"}), 400
+
+    labels = [label for label in project.get("labels", []) if not label.get("system")]
+    target_label = next((label for label in labels if str(label.get("id")) == label_id), None)
+    if not target_label:
+        return jsonify({"error": "找不到指定的類別"}), 400
+    mmsi_attribute = next((
+        attribute for attribute in target_label.get("attributes", [])
+        if str(attribute.get("name") or attribute.get("id") or "").strip().casefold() == "mmsi"
+    ), None)
+    if not mmsi_attribute:
+        return jsonify({"error": f"類別「{target_label.get('name', label_id)}」沒有 mmsi 屬性"}), 400
+
+    mmsi_attribute_ids = {
+        str(attribute.get("id"))
+        for label in labels
+        for attribute in label.get("attributes", [])
+        if str(attribute.get("name") or attribute.get("id") or "").strip().casefold() == "mmsi"
+    }
+    mmsi_attribute_ids.add("mmsi")
+    target_mmsi_attribute_id = str(mmsi_attribute.get("id"))
+    matched_annotations = 0
+    updated_annotations = 0
+    updated_images = 0
+
+    for annotation_path in (directory / "annotations").glob("*.json"):
+        document = read_json(annotation_path, {})
+        annotations = document.get("annotations")
+        if not isinstance(annotations, list):
+            continue
+        changed = False
+        for annotation in annotations:
+            if not isinstance(annotation, dict) or (annotation.get("mode") or annotation.get("type")) != "reid":
+                continue
+            annotation_lid = annotation.get("track_id", annotation.get("trackId"))
+            if str(annotation_lid if annotation_lid is not None else "").strip() != lid:
+                continue
+            matched_annotations += 1
+            current_attributes = annotation.get("attributes") if isinstance(annotation.get("attributes"), dict) else {}
+            next_attributes = {key: value for key, value in current_attributes.items() if str(key) not in mmsi_attribute_ids}
+            next_attributes[target_mmsi_attribute_id] = mmsi
+            if str(annotation.get("label_id") or annotation.get("labelId") or "") == label_id and next_attributes == current_attributes:
+                continue
+            annotation["label_id"] = label_id
+            annotation["attributes"] = next_attributes
+            updated_annotations += 1
+            changed = True
+        if changed:
+            document["revision"] = int(document.get("revision", 0)) + 1
+            document["updatedAt"] = utc_now()
+            write_json_atomic(annotation_path, document)
+            updated_images += 1
+
+    return jsonify({
+        "matched_annotations": matched_annotations,
+        "updated_annotations": updated_annotations,
+        "updated_images": updated_images,
+    })
 
 
 @app.get("/api/projects/<project_id>/download")

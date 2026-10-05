@@ -61,6 +61,109 @@ const nearestTimelineFrame = (timeline, time) => {
   return Math.abs(previous.video_pts_s - time) <= Math.abs(next.video_pts_s - time) ? previous.frame_index : next.frame_index
 }
 
+const reidInfoValue = (input) => {
+  const text = input === undefined || input === null || String(input).trim() === '' ? '—' : String(input)
+  return text.length > 24 ? `${text.slice(0, 21)}…` : text
+}
+
+const reidInfoRows = (item, label) => {
+  const rows = [`GID: ${reidInfoValue(item.identity_id)}`, `LID: ${reidInfoValue(item.track_id)}`]
+  const mmsiAttribute = label?.attributes?.find((attribute) => String(attribute.name || attribute.id || '').trim().toLocaleLowerCase() === 'mmsi')
+  const mmsiKey = mmsiAttribute?.id || 'mmsi'
+  if (Object.prototype.hasOwnProperty.call(item.attributes || {}, mmsiKey)) rows.push(`MMSI: ${reidInfoValue(item.attributes[mmsiKey])}`)
+  return rows
+}
+
+const rectanglesOverlap = (first, second, padding = 0) => (
+  first.x < second.x + second.width + padding
+  && first.x + first.width + padding > second.x
+  && first.y < second.y + second.height + padding
+  && first.y + first.height + padding > second.y
+)
+
+const overlapArea = (first, second, padding = 0) => {
+  const width = Math.min(first.x + first.width + padding, second.x + second.width + padding) - Math.max(first.x, second.x)
+  const height = Math.min(first.y + first.height + padding, second.y + second.height + padding) - Math.max(first.y, second.y)
+  return Math.max(0, width) * Math.max(0, height)
+}
+
+const layoutReidInfoTags = (annotations, labels, selectedId, zoom, imageWidth, imageHeight) => {
+  const labelById = new Map(labels.map((label) => [label.id, label]))
+  const occupied = []
+  const gap = 6 / zoom
+  const padding = 4 / zoom
+  const clampCandidate = (candidate, width, height) => ({
+    x: Math.max(0, Math.min(Math.max(0, imageWidth - width), candidate.x)),
+    y: Math.max(0, Math.min(Math.max(0, imageHeight - height), candidate.y)),
+    width,
+    height,
+  })
+  const items = annotations.filter((item) => item.type === 'reid').map((item) => {
+    const rows = reidInfoRows(item, labelById.get(item.labelId))
+    const width = Math.max(78, Math.max(...rows.map((row) => row.length)) * 6.7 + 10) / zoom
+    const height = (rows.length * 14 + 8) / zoom
+    const left = Math.min(item.points[0].x, item.points[1].x)
+    const top = Math.min(item.points[0].y, item.points[1].y)
+    const right = Math.max(item.points[0].x, item.points[1].x)
+    const bottom = Math.max(item.points[0].y, item.points[1].y)
+    return { item, rows, width, height, left, top, right, bottom, selected: item.id === selectedId }
+  }).sort((first, second) => Number(second.selected) - Number(first.selected) || first.top - second.top || first.left - second.left)
+
+  return items.map((entry) => {
+    const { item, rows, width, height, left, top, right, bottom, selected } = entry
+    const baseX = (left + right - width) / 2
+    const baseY = top - height - gap
+    const step = height + gap
+    const rawCandidates = []
+    for (let layer = 0; layer <= 16; layer += 1) rawCandidates.push({ x: baseX, y: baseY - layer * step })
+    const horizontalStep = width + gap
+    for (let column = 1; column <= 12; column += 1) {
+      rawCandidates.push({ x: baseX - column * horizontalStep, y: baseY }, { x: baseX + column * horizontalStep, y: baseY })
+    }
+    for (let layer = 1; layer <= 8; layer += 1) {
+      for (let column = 1; column <= 6; column += 1) {
+        rawCandidates.push(
+          { x: baseX - column * horizontalStep, y: baseY - layer * step },
+          { x: baseX + column * horizontalStep, y: baseY - layer * step },
+        )
+      }
+    }
+    const seen = new Set()
+    const candidates = rawCandidates.map((candidate) => clampCandidate(candidate, width, height)).filter((candidate) => {
+      const key = `${candidate.x.toFixed(3)}:${candidate.y.toFixed(3)}`
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+    let placement = candidates.find((candidate) => !occupied.some((current) => rectanglesOverlap(candidate, current, padding)))
+    if (!placement) {
+      const preferred = candidates[0]
+      placement = candidates.reduce((best, candidate) => {
+        const overlap = occupied.reduce((sum, current) => sum + overlapArea(candidate, current, padding), 0)
+        const distance = Math.hypot(candidate.x - preferred.x, candidate.y - preferred.y)
+        const score = overlap * 1000 + distance
+        return !best || score < best.score ? { ...candidate, score } : best
+      }, null)
+    }
+    const placed = { x: placement.x, y: placement.y, width, height }
+    occupied.push(placed)
+    const tagCenter = { x: placed.x + width / 2, y: placed.y + height / 2 }
+    const lineStart = { x: Math.max(left, Math.min(right, tagCenter.x)), y: Math.max(top, Math.min(bottom, tagCenter.y)) }
+    const lineEnd = { x: Math.max(placed.x, Math.min(placed.x + width, lineStart.x)), y: Math.max(placed.y, Math.min(placed.y + height, lineStart.y)) }
+    const leaderLength = Math.hypot(lineEnd.x - lineStart.x, lineEnd.y - lineStart.y)
+    return {
+      ...placed,
+      id: item.id,
+      rows,
+      color: labelById.get(item.labelId)?.color || '#fff',
+      selected,
+      leader: leaderLength > 1 / zoom,
+      lineStart,
+      lineEnd,
+    }
+  })
+}
+
 export default function AnnotationCanvas({ image, imageUrl, annotations, labels, activeLabelId, tool, selectedId, onSelect, onCommit, onUpdate, onDraftActiveChange, resetToken, currentFrame = 0, onFrameChange, readOnlyGeometry = false, frameTimeline = [], onVideoMetadata, overlayPoints = [], showReidInfo = false, snapTolerance = DEFAULT_SNAP_TOLERANCE }) {
   const svgRef = useRef(null)
   const videoRef = useRef(null)
@@ -380,6 +483,9 @@ export default function AnnotationCanvas({ image, imageUrl, annotations, labels,
     if (!isSegmentation(item.type) || !previewPositions.size) return item
     return { ...item, points: item.points.map((point) => previewPositions.has(point.vertexId) ? { ...point, ...previewPositions.get(point.vertexId) } : point) }
   })
+  const reidInfoLayouts = showReidInfo
+    ? layoutReidInfoTags(renderedAnnotations, labels, selectedId, view.zoom, image.width, image.height).sort((first, second) => Number(first.selected) - Number(second.selected))
+    : []
   let preview = draft
   let previewIsBox = false
   if (cursor && draft.length) {
@@ -397,9 +503,11 @@ export default function AnnotationCanvas({ image, imageUrl, annotations, labels,
         {image.mediaType === 'video' ? <foreignObject x="0" y="0" width={image.width || 1280} height={image.height || 720} style={{ pointerEvents: 'none' }}><video ref={videoRef} src={imageUrl} style={{ width: '100%', height: '100%', objectFit: 'contain' }} onLoadedMetadata={(event) => onVideoMetadata?.({ width: event.currentTarget.videoWidth, height: event.currentTarget.videoHeight })} onTimeUpdate={(event) => onFrameChange?.(nearestTimelineFrame(frameTimeline, event.currentTarget.currentTime))} /></foreignObject> : <image href={imageUrl} x="0" y="0" width={image.width} height={image.height} />}
         {renderedAnnotations.map((item) => {
           const label = labels.find((candidate) => candidate.id === item.labelId)
-          return <Shape key={item.id} item={item} label={label} color={label?.color || '#fff'} selected={item.id === selectedId} zoom={view.zoom} readOnlyGeometry={readOnlyGeometry} showReidInfo={showReidInfo} imageWidth={image.width} imageHeight={image.height} />
+          return <Shape key={item.id} item={item} color={label?.color || '#fff'} selected={item.id === selectedId} zoom={view.zoom} readOnlyGeometry={readOnlyGeometry} />
         })}
         {overlayPoints.map((point, index) => <g key={`${point.mmsi}-${index}`} pointerEvents="none"><circle cx={point.x} cy={point.y} r={7 / view.zoom} fill="#22d3ee" stroke="#fff" strokeWidth={2 / view.zoom} vectorEffect="non-scaling-stroke" /><line x1={point.x - 12 / view.zoom} y1={point.y} x2={point.x + 12 / view.zoom} y2={point.y} stroke="#22d3ee" strokeWidth={2 / view.zoom} vectorEffect="non-scaling-stroke" /><line x1={point.x} y1={point.y - 12 / view.zoom} x2={point.x} y2={point.y + 12 / view.zoom} stroke="#22d3ee" strokeWidth={2 / view.zoom} vectorEffect="non-scaling-stroke" /><text x={point.x + 11 / view.zoom} y={point.y - 11 / view.zoom} fill="#fff" stroke="#08111f" strokeWidth={3 / view.zoom} paintOrder="stroke" fontSize={14 / view.zoom} fontWeight="700">{point.mmsi}</text></g>)}
+        {reidInfoLayouts.filter((layout) => layout.leader).map((layout) => <g key={`leader-${layout.id}`} pointerEvents="none"><line x1={layout.lineStart.x} y1={layout.lineStart.y} x2={layout.lineEnd.x} y2={layout.lineEnd.y} stroke="#020617" strokeWidth={(layout.selected ? 5.5 : 5) / view.zoom} strokeLinecap="round" opacity=".95" vectorEffect="non-scaling-stroke" /><line x1={layout.lineStart.x} y1={layout.lineStart.y} x2={layout.lineEnd.x} y2={layout.lineEnd.y} stroke={layout.color} strokeWidth={(layout.selected ? 2.75 : 2.25) / view.zoom} strokeLinecap="round" vectorEffect="non-scaling-stroke" /><circle cx={layout.lineStart.x} cy={layout.lineStart.y} r={(layout.selected ? 4 : 3.5) / view.zoom} fill={layout.color} stroke="#020617" strokeWidth={1.5 / view.zoom} vectorEffect="non-scaling-stroke" /></g>)}
+        {reidInfoLayouts.map((layout) => <ReidInfoTag key={layout.id} layout={layout} zoom={view.zoom} />)}
         {preview.length > 0 && (previewIsBox ? <polygon className="draft-shape" points={preview.map((p) => `${p.x},${p.y}`).join(' ')} strokeWidth={2 / view.zoom} vectorEffect="non-scaling-stroke" /> : <polyline className={`draft-shape ${cursor?.chain?.length ? 'boundary-chain-preview' : ''}`} points={preview.map((p) => `${p.x},${p.y}`).join(' ')} strokeWidth={2 / view.zoom} vectorEffect="non-scaling-stroke" />)}
         {draft.map((point, index) => <circle key={index} cx={point.x} cy={point.y} r={5 / view.zoom} className="vertex draft" />)}
         {cursor?.snap && <circle cx={cursor.x} cy={cursor.y} r={7 / view.zoom} className={`snap-indicator ${cursor.snap}`} strokeWidth={2 / view.zoom} />}
@@ -411,19 +519,8 @@ export default function AnnotationCanvas({ image, imageUrl, annotations, labels,
   )
 }
 
-function ReidInfoTag({ item, mmsi, hasMmsi, color, zoom, imageWidth, imageHeight }) {
-  const value = (input) => {
-    const text = input === undefined || input === null || String(input).trim() === '' ? '—' : String(input)
-    return text.length > 24 ? `${text.slice(0, 21)}…` : text
-  }
-  const rows = [`GID: ${value(item.identity_id)}`, `LID: ${value(item.track_id)}`]
-  if (hasMmsi) rows.push(`MMSI: ${value(mmsi)}`)
-  const width = Math.max(78, Math.max(...rows.map((row) => row.length)) * 6.7 + 10) / zoom
-  const height = (rows.length * 14 + 8) / zoom
-  const left = Math.min(item.points[0].x, item.points[1].x)
-  const top = Math.min(item.points[0].y, item.points[1].y)
-  const x = Math.max(0, Math.min(Math.max(0, imageWidth - width), left))
-  const y = Math.max(0, Math.min(Math.max(0, imageHeight - height), top))
+function ReidInfoTag({ layout, zoom }) {
+  const { x, y, width, height, rows, color } = layout
   return <g pointerEvents="none">
     <rect x={x} y={y} width={width} height={height} rx={4 / zoom} fill="#020617" fillOpacity=".88" stroke={color} strokeWidth={1 / zoom} vectorEffect="non-scaling-stroke" />
     <text x={x + 5 / zoom} y={y + 13 / zoom} fill="#f8fafc" fontSize={11 / zoom} fontFamily="'DM Mono', monospace" fontWeight="600">
@@ -432,13 +529,9 @@ function ReidInfoTag({ item, mmsi, hasMmsi, color, zoom, imageWidth, imageHeight
   </g>
 }
 
-function Shape({ item, label, color, selected, zoom, readOnlyGeometry, showReidInfo, imageWidth, imageHeight }) {
+function Shape({ item, color, selected, zoom, readOnlyGeometry }) {
   const common = { fill: color, fillOpacity: selected ? 0.48 : 0.12, stroke: color, strokeWidth: (selected ? 3 : 2) / zoom, vectorEffect: 'non-scaling-stroke', className: selected ? 'annotation-shape selected' : 'annotation-shape' }
   const points = annotationPoints(item)
   const showVertices = !readOnlyGeometry && (selected || isSegmentation(item.type))
-  const mmsiAttribute = label?.attributes?.find((attribute) => String(attribute.name || attribute.id || '').trim().toLocaleLowerCase() === 'mmsi')
-  const mmsiKey = mmsiAttribute?.id || 'mmsi'
-  const hasMmsi = Object.prototype.hasOwnProperty.call(item.attributes || {}, mmsiKey)
-  const mmsi = hasMmsi ? item.attributes[mmsiKey] : undefined
-  return <g>{['rectangle', 'reid'].includes(item.type) ? <rect x={Math.min(item.points[0].x, item.points[1].x)} y={Math.min(item.points[0].y, item.points[1].y)} width={Math.abs(item.points[1].x - item.points[0].x)} height={Math.abs(item.points[1].y - item.points[0].y)} {...common} /> : <polygon points={points.map((p) => `${p.x},${p.y}`).join(' ')} {...common} />}{showVertices && points.map((point, index) => <circle key={index} cx={point.x} cy={point.y} r={4 / zoom} fill="#fff" stroke={color} strokeWidth={2 / zoom} />)}{showReidInfo && item.type === 'reid' && <ReidInfoTag item={item} mmsi={mmsi} hasMmsi={hasMmsi} color={color} zoom={zoom} imageWidth={imageWidth} imageHeight={imageHeight} />}</g>
+  return <g>{['rectangle', 'reid'].includes(item.type) ? <rect x={Math.min(item.points[0].x, item.points[1].x)} y={Math.min(item.points[0].y, item.points[1].y)} width={Math.abs(item.points[1].x - item.points[0].x)} height={Math.abs(item.points[1].y - item.points[0].y)} {...common} /> : <polygon points={points.map((p) => `${p.x},${p.y}`).join(' ')} {...common} />}{showVertices && points.map((point, index) => <circle key={index} cx={point.x} cy={point.y} r={4 / zoom} fill="#fff" stroke={color} strokeWidth={2 / zoom} />)}</g>
 }

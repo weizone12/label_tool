@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { ArrowLeft, Boxes, ChevronRight, Folder, LogOut, Plus, Trash2, Users } from 'lucide-react'
+import { ArrowLeft, Boxes, CheckCircle2, ChevronRight, Folder, LogOut, Plus, Trash2, Users } from 'lucide-react'
 import { api } from './api'
 import { authUrl, useAuth } from './AuthGate'
 import AssignmentDialog from './components/AssignmentDialog'
@@ -56,10 +56,10 @@ export default function App() {
 
   const projectCard = (project) => (
     <article className="project-card" key={project.id} onClick={() => setActive(project)}>
-      <div className="project-card-top"><span>{project.imageCount || 0} 張圖片</span>{user.is_admin && <><button className="icon-button" title="指派執行人員" onClick={(event) => { event.stopPropagation(); setAssigning(project) }}><Users size={16} /></button><button className="icon-button danger" title="刪除專案" onClick={async (event) => {
+      <div className="project-card-top"><span>{project.imageCount || 0} 張圖片</span><div className="project-card-actions">{project.completed && <span className="project-complete-badge"><CheckCircle2 size={14} />已完成</span>}{user.is_admin && <><button className="icon-button" title="指派執行人員" onClick={(event) => { event.stopPropagation(); setAssigning(project) }}><Users size={16} /></button><button className="icon-button danger" title="刪除專案" onClick={async (event) => {
         event.stopPropagation()
         if (confirm(`確定刪除「${project.name}」及所有標註資料？`)) { await api.deleteProject(project.id); refresh() }
-      }}><Trash2 size={16} /></button></>}</div>
+      }}><Trash2 size={16} /></button></>}</div></div>
       <h2>{project.name}</h2>
       <div className="mode-chips"><span>{project.projectType === 'editing' ? '純修改專案' : '標註專案'}</span><span>{modeName(project.primaryMode)}</span></div>
       <small>更新於 {new Date(project.updatedAt).toLocaleString('zh-TW')}</small>
