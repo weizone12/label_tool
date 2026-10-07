@@ -142,6 +142,67 @@ class AuthIntegrationTestCase(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.get_json()["editor_state"], admin_state)
 
+    def test_assigned_user_can_batch_update_reid_gid(self):
+        admin = {"id": "admin-id", "username": "admin", "is_admin": True,
+                 "status": "active", "must_change_password": False}
+        user = {"id": "user-id", "username": "worker", "is_admin": False,
+                "status": "active", "must_change_password": False}
+        unassigned_user = {"id": "other-user-id", "username": "other", "is_admin": False,
+                           "status": "active", "must_change_password": False}
+        active_user = admin
+
+        def verify(_request, timeout=None):
+            return FakeAuthResponse(active_user)
+
+        with patch("auth_integration.urllib.request.urlopen", side_effect=verify):
+            project = self.client.post("/api/projects", json={
+                "name": "reid batch", "primaryMode": "reid", "labels": [{
+                    "id": "ship", "name": "Ship", "color": "#00ff00",
+                    "attributes": [{"id": "mmsi-attribute", "name": "MMSI", "type": "text"}],
+                }],
+            }, headers={"X-CSRF-Token": "csrf"}).get_json()
+            self.client.put(
+                f"/api/projects/{project['id']}/assignments",
+                json={"user_ids": [user["id"]]}, headers={"X-CSRF-Token": "csrf"},
+            )
+            image = self.client.post(
+                f"/api/projects/{project['id']}/images",
+                data={"files": (io.BytesIO(b"not-an-image"), "photo.jpg")},
+                content_type="multipart/form-data", headers={"X-CSRF-Token": "csrf"},
+            ).get_json()[0]
+            self.client.put(
+                f"/api/projects/{project['id']}/images/{image['id']}/annotation",
+                json={"annotations": [{
+                    "id": "bbox-1", "mode": "reid", "label_id": "ship",
+                    "geometry": {"x": 1, "y": 2, "width": 20, "height": 10},
+                    "attributes": {"mmsi-attribute": "old"},
+                    "identity_id": "gid-1", "track_id": 1,
+                }]}, headers={"X-CSRF-Token": "csrf"},
+            )
+
+            active_user = user
+            response = self.client.put(
+                f"/api/projects/{project['id']}/reid/gid",
+                json={"gid": "gid-1", "label_id": "ship", "mmsi": "416035000"},
+                headers={"X-CSRF-Token": "csrf"},
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.get_json(), {
+                "matched_annotations": 1, "updated_annotations": 1, "updated_images": 1,
+            })
+            annotation = self.client.get(
+                f"/api/projects/{project['id']}/images/{image['id']}/annotation"
+            ).get_json()["annotations"][0]
+            self.assertEqual(annotation["attributes"], {"mmsi-attribute": "416035000"})
+
+            active_user = unassigned_user
+            denied = self.client.put(
+                f"/api/projects/{project['id']}/reid/gid",
+                json={"gid": "gid-1", "label_id": "ship", "mmsi": "123"},
+                headers={"X-CSRF-Token": "csrf"},
+            )
+            self.assertEqual(denied.status_code, 403)
+
 
 if __name__ == "__main__":
     unittest.main()
