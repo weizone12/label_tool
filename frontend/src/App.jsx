@@ -9,6 +9,12 @@ import Workspace from './components/Workspace'
 const groupSegments = (group = '') => group.split('/').map((part) => part.trim()).filter(Boolean)
 const groupPath = (segments) => segments.join(' / ')
 const isSamePath = (left, right) => groupPath(groupSegments(left)) === groupPath(groupSegments(right))
+const compareGroupDisplayNames = (left, right) => {
+  const leftName = groupSegments(left).at(-1) || ''
+  const rightName = groupSegments(right).at(-1) || ''
+  return leftName.localeCompare(rightName, 'zh-TW', { numeric: true, sensitivity: 'base' })
+    || left.localeCompare(right, 'zh-TW', { numeric: true, sensitivity: 'base' })
+}
 const isWithinPath = (group, parent) => {
   const childSegments = groupSegments(group)
   const parentSegments = groupSegments(parent)
@@ -69,7 +75,7 @@ export default function App() {
     const segments = groupSegments(project.group)
     if (segments.length <= activeSegments.length || !isWithinPath(project.group, activeGroup)) return []
     return [groupPath(segments.slice(0, activeSegments.length + 1))]
-  }))].sort((a, b) => a.localeCompare(b, 'zh-TW', { numeric: true, sensitivity: 'base' }))
+  }))].sort(compareGroupDisplayNames)
 
   const projectCard = (project) => (
     <article className="project-card" key={project.id} onClick={() => setActive(project)}>
