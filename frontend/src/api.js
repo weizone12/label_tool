@@ -86,6 +86,7 @@ export const api = {
     method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ user_ids: userIds }),
   })).user_ids,
   listProjects: () => request('/api/projects'),
+  reconcileProjects: () => request('/api/projects/reconcile', { method: 'POST' }),
   createProject: (data) => request('/api/projects', {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data),
   }),

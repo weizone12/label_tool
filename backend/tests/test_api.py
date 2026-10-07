@@ -23,6 +23,43 @@ class ApiTestCase(unittest.TestCase):
     def tearDown(self):
         self.temp_dir.cleanup()
 
+    def test_reconcile_projects_removes_missing_media_from_completion_count(self):
+        project = self.client.post("/api/projects", json={
+            "name": "重新檢查專案", "primaryMode": "rectangle",
+            "labels": [{"id": "item", "name": "Item", "color": "#ff0000", "attributes": []}],
+        }).get_json()
+        uploaded = []
+        for filename in ("completed.png", "deleted.png"):
+            image_buffer = io.BytesIO()
+            Image.new("RGB", (20, 10), "white").save(image_buffer, format="PNG")
+            image_buffer.seek(0)
+            uploaded.append(self.client.post(
+                f"/api/projects/{project['id']}/images",
+                data={"files": (image_buffer, filename)}, content_type="multipart/form-data",
+            ).get_json()[0])
+
+        self.client.put(
+            f"/api/projects/{project['id']}/images/{uploaded[0]['id']}/annotation",
+            json={"annotations": [], "classifications": [], "completed": True},
+        )
+        project_directory = self.app_module.project_dir(project["id"])
+        metadata = self.app_module.image_metadata(project_directory)
+        Path(metadata[uploaded[1]["id"]]["sourcePath"]).unlink()
+
+        before = self.client.get("/api/projects").get_json()[0]
+        self.assertEqual(before["imageCount"], 2)
+        self.assertFalse(before["completed"])
+
+        response = self.client.post("/api/projects/reconcile")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["removedEntries"], 1)
+        after = self.client.get("/api/projects").get_json()[0]
+        self.assertEqual(after["imageCount"], 1)
+        self.assertEqual(after["completedCount"], 1)
+        self.assertEqual(after["pendingCount"], 0)
+        self.assertTrue(after["completed"])
+        self.assertTrue((project_directory / "annotations" / f"{uploaded[0]['id']}.json").exists())
+
     def test_project_image_annotation_lifecycle(self):
         response = self.client.post("/api/projects", json={
             "name": "測試專案",

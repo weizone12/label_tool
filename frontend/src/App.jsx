@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { ArrowLeft, Boxes, CheckCircle2, ChevronRight, Folder, LogOut, Plus, Trash2, Users } from 'lucide-react'
+import { ArrowLeft, Boxes, CheckCircle2, ChevronRight, Folder, LogOut, Plus, RefreshCw, Trash2, Users } from 'lucide-react'
 import { api } from './api'
 import { authUrl, useAuth } from './AuthGate'
 import AssignmentDialog from './components/AssignmentDialog'
@@ -23,6 +23,8 @@ export default function App() {
   const [error, setError] = useState('')
   const [assigning, setAssigning] = useState(null)
   const [loggingOut, setLoggingOut] = useState(false)
+  const [reconciling, setReconciling] = useState(false)
+  const [notice, setNotice] = useState('')
   const [activeGroup, setActiveGroup] = useState('')
 
   const refresh = async () => {
@@ -39,6 +41,21 @@ export default function App() {
     } catch (err) {
       setError(err.message)
       setLoggingOut(false)
+    }
+  }
+
+  const reconcileProjects = async () => {
+    setReconciling(true)
+    setError('')
+    setNotice('')
+    try {
+      const result = await api.reconcileProjects()
+      await refresh()
+      setNotice(`已重新檢查 ${result.projectsChecked} 個專案，移除 ${result.removedEntries} 筆失效索引，補回 ${result.addedEntries} 筆圖片索引。`)
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setReconciling(false)
     }
   }
 
@@ -77,11 +94,13 @@ export default function App() {
       <header className="home-header">
         <div><span className="eyebrow">LOCAL ANNOTATION WORKSPACE</span><h1>MIKO 標註達人</h1><p>管理資料集，建立精確且可追溯的標註。</p></div>
         {user.is_admin && <div className="home-actions">
+          <button className="secondary-button" onClick={reconcileProjects} disabled={reconciling}><RefreshCw size={18} className={reconciling ? 'spin' : ''} />{reconciling ? '重新檢查中…' : '重新檢查專案'}</button>
           <button className="secondary-button" onClick={() => window.location.assign(authUrl('/admin/users'))}><Users size={18} />管理使用者</button>
           <button className="primary-button" onClick={() => setCreating(true)}><Plus size={18} />建立專案</button>
         </div>}
       </header>
       {error && <div className="error-banner">{error}</div>}
+      {notice && <div className="success-banner">{notice}</div>}
       {activeGroup && <div className="group-toolbar"><button className="text-button" onClick={() => setActiveGroup(groupPath(activeSegments.slice(0, -1)))}><ArrowLeft size={17} />返回上一層</button><div className="group-breadcrumbs"><button onClick={() => setActiveGroup('')}>所有專案</button>{activeSegments.map((part, index) => <span key={groupPath(activeSegments.slice(0, index + 1))}><ChevronRight size={14} /><button onClick={() => setActiveGroup(groupPath(activeSegments.slice(0, index + 1)))}>{part}</button></span>)}<em>{visibleProjects.length} 個專案</em></div></div>}
       <section className="project-grid">
         {projects.length === 0 ? (

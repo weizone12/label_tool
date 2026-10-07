@@ -49,6 +49,9 @@ h1, h2, p { margin-top: 0; }
 .empty-state { grid-column: 1 / -1; color: var(--muted); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 7px; text-align: center; border-style: dashed; }
 .empty-state strong { color: #fff; font-size: 18px; }
 .error-banner { background: rgba(251,113,133,.1); color: #fecdd3; border: 1px solid rgba(251,113,133,.35); padding: 10px 14px; border-radius: 8px; margin: 14px 0; }
+.success-banner { background: rgba(52,211,153,.1); color: #a7f3d0; border: 1px solid rgba(52,211,153,.35); padding: 10px 14px; border-radius: 8px; margin: 14px 0; }
+.spin { animation: spin .9s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
 
 .setup-shell { max-width: 960px; }
 .setup-heading { display: flex; gap: 18px; align-items: flex-start; margin: 36px 0 28px; }

@@ -343,6 +343,100 @@ def list_image_records(directory: Path) -> list[dict]:
     return records
 
 
+def reconcile_project_media(directory: Path) -> dict:
+    metadata = image_metadata(directory)
+    reconciled = {}
+    indexed_paths = set()
+    images_dir = (directory / "images").resolve()
+    annotation_documents = {
+        annotation_path.stem: read_json(annotation_path, {})
+        for annotation_path in (directory / "annotations").glob("*.json")
+    }
+    annotation_ids_by_source = {}
+    for annotation_id, document in annotation_documents.items():
+        media = document.get("media") if isinstance(document, dict) else None
+        source_path = media.get("source_path") if isinstance(media, dict) else None
+        if source_path:
+            annotation_ids_by_source[Path(source_path).resolve()] = str(media.get("id") or annotation_id)
+    removed_entries = 0
+    added_entries = 0
+
+    for image_id, raw_item in metadata.items():
+        if not isinstance(raw_item, dict):
+            removed_entries += 1
+            continue
+        item = dict(raw_item)
+        candidates = []
+        if item.get("sourcePath"):
+            candidates.append(Path(item["sourcePath"]))
+        if item.get("storedRelativePath"):
+            candidates.append(images_dir / safe_media_relative_path(item["storedRelativePath"]))
+        if item.get("projectRelativePath"):
+            candidates.append(directory / safe_media_relative_path(item["projectRelativePath"]))
+        source = next((candidate.resolve() for candidate in candidates
+                       if candidate.is_file() and candidate.suffix.lower() in ALLOWED_MEDIA), None)
+        if source is None:
+            removed_entries += 1
+            continue
+        item["sourcePath"] = str(source)
+        try:
+            stored_relative = source.relative_to(images_dir)
+            item["storedRelativePath"] = str(stored_relative)
+            item["projectRelativePath"] = (Path("images") / stored_relative).as_posix()
+        except ValueError:
+            pass
+        reconciled[str(image_id)] = item
+        indexed_paths.add(source)
+
+    if images_dir.exists():
+        for path in images_dir.rglob("*"):
+            if not path.is_file() or path.suffix.lower() not in ALLOWED_MEDIA:
+                continue
+            source = path.resolve()
+            if source in indexed_paths:
+                continue
+            image_id = annotation_ids_by_source.get(source, path.stem)
+            if image_id in reconciled:
+                image_id = source_image_id(source)
+            stored_relative = source.relative_to(images_dir)
+            record = image_record(source, image_id)
+            reconciled[image_id] = {
+                "sourcePath": str(source),
+                "originalFilename": path.name,
+                "relativePath": str(stored_relative),
+                "storedRelativePath": str(stored_relative),
+                "projectRelativePath": (Path("images") / stored_relative).as_posix(),
+                **{key: record[key] for key in ("filename", "width", "height", "mediaType")},
+            }
+            indexed_paths.add(source)
+            added_entries += 1
+
+    project_path = directory / "project.json"
+    project = read_json(project_path, {})
+    image_count = len(reconciled)
+    completed_count = sum(
+        1 for image_id in reconciled
+        if bool(annotation_documents.get(image_id, {}).get("completed", False))
+    )
+    changed = reconciled != metadata or project.get("imageCount") != image_count
+    if reconciled != metadata:
+        write_json_atomic(directory / "images.json", reconciled)
+    if changed:
+        project["imageCount"] = image_count
+        project["updatedAt"] = utc_now()
+        write_json_atomic(project_path, project)
+    return {
+        "id": project.get("id", directory.name),
+        "name": project.get("name", directory.name),
+        "imageCount": image_count,
+        "completedCount": completed_count,
+        "pendingCount": max(0, image_count - completed_count),
+        "completed": image_count > 0 and completed_count == image_count,
+        "removedEntries": removed_entries,
+        "addedEntries": added_entries,
+    }
+
+
 def run_windows_picker(kind: str, include_videos: bool = False, videos_only: bool = False) -> list[Path]:
     if os.name != "nt":
         raise RuntimeError("Windows 原生選擇視窗僅支援 Windows")
@@ -548,6 +642,23 @@ def list_projects():
         projects = [project for project in projects if project.get("id") in allowed]
     projects.sort(key=lambda item: item.get("updatedAt", ""), reverse=True)
     return jsonify(projects)
+
+
+@app.post("/api/projects/reconcile")
+def reconcile_projects():
+    if not app.config.get("AUTH_DISABLED_FOR_TESTS") and not getattr(g, "current_user", {}).get("is_admin"):
+        return jsonify({"error": "只有管理員可以重新檢查專案"}), 403
+    ensure_dirs()
+    results = [
+        reconcile_project_media(config_path.parent)
+        for config_path in PROJECTS_DIR.glob("*/project.json")
+    ]
+    return jsonify({
+        "projectsChecked": len(results),
+        "removedEntries": sum(item["removedEntries"] for item in results),
+        "addedEntries": sum(item["addedEntries"] for item in results),
+        "projects": results,
+    })
 
 
 @app.post("/api/projects")
