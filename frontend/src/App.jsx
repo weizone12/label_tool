@@ -9,11 +9,11 @@ import Workspace from './components/Workspace'
 const groupSegments = (group = '') => group.split('/').map((part) => part.trim()).filter(Boolean)
 const groupPath = (segments) => segments.join(' / ')
 const isSamePath = (left, right) => groupPath(groupSegments(left)) === groupPath(groupSegments(right))
+const compareNames = (left, right) => String(left || '').localeCompare(String(right || ''), 'zh-TW', { numeric: true, sensitivity: 'base' })
 const compareGroupDisplayNames = (left, right) => {
   const leftName = groupSegments(left).at(-1) || ''
   const rightName = groupSegments(right).at(-1) || ''
-  return leftName.localeCompare(rightName, 'zh-TW', { numeric: true, sensitivity: 'base' })
-    || left.localeCompare(right, 'zh-TW', { numeric: true, sensitivity: 'base' })
+  return compareNames(leftName, rightName) || compareNames(left, right)
 }
 const isWithinPath = (group, parent) => {
   const childSegments = groupSegments(group)
@@ -70,7 +70,9 @@ export default function App() {
     return segments.map((_, index) => groupPath(segments.slice(0, index + 1)))
   }))].sort((a, b) => a.localeCompare(b, 'zh-TW', { numeric: true, sensitivity: 'base' }))
   const activeSegments = groupSegments(activeGroup)
-  const visibleProjects = activeGroup ? projects.filter((project) => isSamePath(project.group, activeGroup)) : projects.filter((project) => groupSegments(project.group).length === 0)
+  const visibleProjects = activeGroup
+    ? projects.filter((project) => isSamePath(project.group, activeGroup)).sort((a, b) => compareNames(a.name, b.name))
+    : projects.filter((project) => groupSegments(project.group).length === 0)
   const childGroups = [...new Set(projects.flatMap((project) => {
     const segments = groupSegments(project.group)
     if (segments.length <= activeSegments.length || !isWithinPath(project.group, activeGroup)) return []
