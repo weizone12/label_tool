@@ -141,6 +141,10 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
   const [aisSourceName, setAisSourceName] = useState('')
   const [showReidInfo, setShowReidInfo] = useState(true)
   const [sharedCameraId, setSharedCameraId] = useState('')
+  const [cameraRangeStart, setCameraRangeStart] = useState('1')
+  const [cameraRangeEnd, setCameraRangeEnd] = useState('1')
+  const [applyingCameraId, setApplyingCameraId] = useState(false)
+  const [cameraIdResult, setCameraIdResult] = useState('')
   const [batchGid, setBatchGid] = useState('')
   const [batchGidMmsi, setBatchGidMmsi] = useState('')
   const [batchGidLabelId, setBatchGidLabelId] = useState(project.labels.find((label) => !label.system)?.id || '')
@@ -711,6 +715,10 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
   const reidAnnotations = document.annotations.filter((item) => item.type === 'reid')
   const cameraIdValues = [...new Set(reidAnnotations.map((item) => String(item.camera_id ?? '').trim()))]
   const hasMixedCameraIds = cameraIdValues.length > 1
+  const cameraRangeStartNumber = Number(cameraRangeStart)
+  const cameraRangeEndNumber = Number(cameraRangeEnd)
+  const cameraRangeValid = Number.isInteger(cameraRangeStartNumber) && Number.isInteger(cameraRangeEndNumber)
+    && cameraRangeStartNumber >= 1 && cameraRangeStartNumber <= cameraRangeEndNumber && cameraRangeEndNumber <= images.length
   const batchGidLabel = project.labels.find((label) => !label.system && label.id === batchGidLabelId)
   const batchGidMmsiAttribute = mmsiAttributeForLabel(batchGidLabel)
   const mmsiOptions = [...new Set(aisRecords.map((item) => String(item.mmsi ?? '').trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
@@ -742,13 +750,58 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
     setSharedCameraId(values.length === 1 ? values[0] : '')
   }, [currentImage?.id, document.annotations])
 
-  const applySharedCameraId = () => {
+  useEffect(() => {
+    const position = images.findIndex((item) => item.id === currentImage?.id)
+    if (position < 0) return
+    const value = String(position + 1)
+    setCameraRangeStart(value)
+    setCameraRangeEnd(value)
+    setCameraIdResult('')
+  }, [currentImage?.id, images])
+
+  const applySharedCameraId = async () => {
     const cameraId = sharedCameraId.trim()
-    if (!cameraId || !reidAnnotations.length) return
-    commit((current) => ({
-      ...current,
-      annotations: current.annotations.map((item) => item.type === 'reid' ? { ...item, camera_id: cameraId } : item),
-    }))
+    if (!cameraId || !cameraRangeValid || applyingCameraId) return
+    const targetImages = images.slice(cameraRangeStartNumber - 1, cameraRangeEndNumber)
+    if (targetImages.length === 1 && targetImages[0].id === currentImage?.id) {
+      if (!reidAnnotations.length) {
+        setCameraIdResult('目前這張圖片沒有 ReID bbox。')
+        return
+      }
+      commit((current) => ({
+        ...current,
+        annotations: current.annotations.map((item) => item.type === 'reid' ? { ...item, camera_id: cameraId } : item),
+      }))
+      setCameraIdResult(`已將第 ${cameraRangeStartNumber} 張的 ${reidAnnotations.length} 個 bbox 設為 Camera ID「${cameraId}」，可使用復原還原。`)
+      return
+    }
+    if (!window.confirm(`確定將第 ${cameraRangeStartNumber}–${cameraRangeEndNumber} 張圖片內的所有 ReID bbox 設為 Camera ID「${cameraId}」？\n\n這是跨圖片操作，無法使用 Ctrl+Z 整批復原。`)) return
+
+    setApplyingCameraId(true)
+    setCameraIdResult('')
+    setError('')
+    try {
+      if (currentImage && !(await save())) return
+      const imageIds = targetImages.map((item) => item.id)
+      const result = await api.updateReidCameraIds(project.id, { image_ids: imageIds, camera_id: cameraId })
+      if (result.matched_annotations === 0) setCameraIdResult(`第 ${cameraRangeStartNumber}–${cameraRangeEndNumber} 張內找不到 ReID bbox。`)
+      else if (result.updated_annotations === 0) setCameraIdResult(`找到 ${result.matched_annotations} 個 bbox，Camera ID 原本已一致。`)
+      else setCameraIdResult(`已更新 ${result.updated_annotations} 個 bbox，共 ${result.updated_images} 張圖片。`)
+      annotationCacheRef.current.clear()
+      if (currentImage && imageIds.includes(currentImage.id)) {
+        const data = await fetchAnnotation(currentImage.id)
+        annotationCacheRef.current.delete(currentImage.id)
+        const sourceAnnotations = regenerateReidAnnotations(data.annotations, currentImage.width, currentImage.height)
+        setDocument({ ...data, annotations: hydrateSegmentationTopology(sourceAnnotations) })
+        setPast([])
+        setFuture([])
+        setSaveState('已儲存')
+      }
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setApplyingCameraId(false)
+    }
   }
 
   const applyGidDetails = async () => {
@@ -983,7 +1036,7 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
           <footer className="image-nav"><button onClick={() => navigate(-1)} disabled={index === 0 || updatingAllCompletion}><ChevronLeft size={18} />上一張</button><div className="progress-track"><span style={{ width: images.length ? `${((index + 1) / images.length) * 100}%` : '0%' }} /></div><button onClick={() => navigate(1)} disabled={index >= images.length - 1 || updatingAllCompletion}>下一張<ChevronRight size={18} /></button></footer>
         </section>
         <aside className="inspector-panel">
-          {tool === 'reid' && currentImage && <section><span className="panel-label">{currentImage.mediaType === 'video' ? '本段影片' : '本張圖片'} CAMERA ID</span><div className="camera-id-row"><input value={sharedCameraId} onChange={(event) => setSharedCameraId(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') applySharedCameraId() }} placeholder={hasMixedCameraIds ? '目前有多個值' : '輸入 Camera ID'} /><button type="button" onClick={applySharedCameraId} disabled={!sharedCameraId.trim() || !reidAnnotations.length}>套用全部</button></div><small className="field-hint">套用到此{currentImage.mediaType === 'video' ? '影片' : '圖片'}的 {reidAnnotations.length} 個 bbox，可使用復原還原。</small></section>}
+          {tool === 'reid' && currentImage && <section><span className="panel-label">CAMERA ID 批次套用</span><div className="camera-id-bulk-form"><label className="field small"><span>Camera ID</span><input value={sharedCameraId} onChange={(event) => { setSharedCameraId(event.target.value); setCameraIdResult('') }} onKeyDown={(event) => { if (event.key === 'Enter') applySharedCameraId() }} placeholder={hasMixedCameraIds ? '目前圖片有多個值' : '輸入 Camera ID'} /></label><div className="camera-range-row"><label className="field small"><span>起始張</span><input type="number" min="1" max={images.length} value={cameraRangeStart} onChange={(event) => { setCameraRangeStart(event.target.value); setCameraIdResult('') }} /></label><label className="field small"><span>結束張</span><input type="number" min="1" max={images.length} value={cameraRangeEnd} onChange={(event) => { setCameraRangeEnd(event.target.value); setCameraIdResult('') }} /></label></div><button type="button" className="secondary-button compact camera-id-apply-button" onClick={applySharedCameraId} disabled={!sharedCameraId.trim() || !cameraRangeValid || applyingCameraId}>{applyingCameraId ? '套用中…' : '套用到圖片範圍'}</button></div><small className="field-hint">範圍依「全部資料」的圖片排序計算，共 {images.length} 張。起訖都是目前圖片時可使用復原；跨圖片批次套用無法整批復原。</small>{cameraIdResult && <div className="batch-result">{cameraIdResult}</div>}</section>}
           {tool === 'reid' && <section><span className="panel-label">GID 批次套用</span><div className="gid-bulk-form"><label className="field small"><span>GID</span><input value={batchGid} onChange={(event) => { setBatchGid(event.target.value); setBatchGidResult('') }} placeholder="輸入要統一的 GID" /></label><label className="field small"><span>類別</span><select value={batchGidLabelId} onChange={(event) => { setBatchGidLabelId(event.target.value); setBatchGidResult('') }}>{project.labels.filter((label) => !label.system).map((label) => <option key={label.id} value={label.id}>{label.name}</option>)}</select></label><label className="field small"><span>MMSI</span><input value={batchGidMmsi} onChange={(event) => { setBatchGidMmsi(event.target.value); setBatchGidResult('') }} placeholder="留空會清除 MMSI" /></label><button type="button" className="secondary-button compact gid-apply-button" onClick={applyGidDetails} disabled={applyingGid || !batchGid.trim() || !batchGidLabel || (Boolean(batchGidMmsi.trim()) && !batchGidMmsiAttribute)}>{applyingGid ? '套用中…' : '套用到整個專案'}</button></div>{batchGidMmsi.trim() && batchGidLabel && !batchGidMmsiAttribute && <small className="field-hint warning">類別「{batchGidLabel.name}」沒有手動建立的 mmsi 屬性，無法填入 MMSI。</small>}<small className="field-hint">會更新整個專案內相同 GID 的 bbox 類別；MMSI 留空時會清除原值。</small>{batchGidResult && <div className="batch-result">{batchGidResult}</div>}</section>}
           {reidEditOnly && aisRecords.length > 0 && <section><span className="panel-label">MMSI 座標{aisSourceName ? ` · ${aisSourceName}` : ''}</span><div className="mmsi-list">{mmsiOptions.map((mmsi) => <div className="mmsi-copy-row" key={mmsi}><span>{mmsi}</span><button type="button" className="secondary-button compact" onClick={() => copySelectedMmsi(mmsi)}>{copiedMmsi === mmsi ? <Check size={14} /> : <Copy size={14} />}{copiedMmsi === mmsi ? '已複製' : '複製'}</button></div>)}</div><small className="field-hint">畫面會同時顯示這張圖片的全部 MMSI 座標。</small></section>}
           {tool !== 'ocr' && <section><span className="panel-label">目前 LABEL</span><div className="label-picker">{project.labels.filter((label) => !label.system).map((label) => <div className="label-picker-row" key={label.id}>{editingLabelId === label.id ? <><input autoFocus value={editingLabelName} onChange={(event) => setEditingLabelName(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') renameLabel(); if (event.key === 'Escape') setEditingLabelId(null) }} /><button className="label-row-action confirm" title="儲存名稱" onClick={renameLabel} disabled={!editingLabelName.trim() || renamingLabel}><Check size={14} /></button><button className="label-row-action" title="取消" onClick={() => setEditingLabelId(null)}><X size={14} /></button></> : <><button className={`label-choice ${activeLabelId === label.id ? 'active' : ''}`} onClick={() => setActiveLabelId(label.id)}><i style={{ background: label.color }} />{label.name}</button>{isAdmin && <button className="label-row-action" title="修改名稱" onClick={() => { setEditingLabelId(label.id); setEditingLabelName(label.name) }}><Pencil size={14} /></button>}{isAdmin && <button className="label-row-action danger" title="刪除未使用的 label" onClick={() => deleteLabel(label)} disabled={Boolean(deletingDefinition)}><Trash2 size={14} /></button>}</>}</div>)}</div>{isAdmin && <div className="label-add-row"><input value={newLabelName} onChange={(event) => setNewLabelName(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') addLabel() }} placeholder="輸入 label 名稱" /><button onClick={addLabel} disabled={!newLabelName.trim() || addingLabel}>{addingLabel ? '新增中…' : '新增'}</button></div>}</section>}

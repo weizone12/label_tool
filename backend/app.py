@@ -1259,6 +1259,64 @@ def update_reid_gid(project_id: str):
     })
 
 
+@app.put("/api/projects/<project_id>/reid/camera-id")
+def update_reid_camera_ids(project_id: str):
+    directory = project_dir(project_id)
+    project = load_project(project_id)
+    if project.get("primaryMode") != "reid":
+        return jsonify({"error": "Camera ID 批次套用僅支援 ReID 專案"}), 400
+
+    body = request.get_json(force=True)
+    camera_id = str(body.get("camera_id") or "").strip()
+    requested_image_ids = body.get("image_ids")
+    if not camera_id:
+        return jsonify({"error": "請輸入 Camera ID"}), 400
+    if not isinstance(requested_image_ids, list) or not requested_image_ids:
+        return jsonify({"error": "請選擇至少一張圖片"}), 400
+
+    image_ids = list(dict.fromkeys(str(image_id) for image_id in requested_image_ids if image_id))
+    existing_image_ids = {record["id"] for record in list_image_records(directory)}
+    if not image_ids or any(image_id not in existing_image_ids for image_id in image_ids):
+        return jsonify({"error": "圖片範圍包含不存在的資料"}), 400
+
+    matched_annotations = 0
+    updated_annotations = 0
+    updated_images = 0
+    for image_id in image_ids:
+        annotation_path = directory / "annotations" / f"{image_id}.json"
+        document = read_json(annotation_path, {})
+        annotations = document.get("annotations")
+        if not isinstance(annotations, list):
+            continue
+        changed = False
+        for annotation in annotations:
+            if not isinstance(annotation, dict) or (annotation.get("mode") or annotation.get("type")) != "reid":
+                continue
+            matched_annotations += 1
+            current_camera_id = annotation.get("camera_id", annotation.get("cameraId"))
+            if str(current_camera_id if current_camera_id is not None else "").strip() == camera_id:
+                continue
+            annotation["camera_id"] = camera_id
+            updated_annotations += 1
+            changed = True
+        if changed:
+            try:
+                revision = int(document.get("revision", 0))
+            except (TypeError, ValueError):
+                revision = 0
+            document["revision"] = revision + 1
+            document["updatedAt"] = utc_now()
+            write_json_atomic(annotation_path, document)
+            updated_images += 1
+
+    return jsonify({
+        "selected_images": len(image_ids),
+        "matched_annotations": matched_annotations,
+        "updated_annotations": updated_annotations,
+        "updated_images": updated_images,
+    })
+
+
 @app.get("/api/projects/<project_id>/download")
 def download_project(project_id: str):
     directory = project_dir(project_id)

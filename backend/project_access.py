@@ -98,11 +98,12 @@ def register_project_access(app: Flask) -> None:
         suffix = "/".join(parts[4:])
         annotation_access = suffix.endswith("/annotation") and request.method in {"GET", "PUT"}
         reid_gid_batch_access = suffix == "reid/gid" and request.method == "PUT"
+        reid_camera_batch_access = suffix == "reid/camera-id" and request.method == "PUT"
         bulk_completion_access = suffix == "completion" and request.method == "PUT"
         read_access = request.method == "GET" and (
             suffix == "" or suffix == "images" or suffix == "download" or suffix.endswith("/content")
         )
-        if annotation_access or reid_gid_batch_access or bulk_completion_access or read_access:
+        if annotation_access or reid_gid_batch_access or reid_camera_batch_access or bulk_completion_access or read_access:
             return None
         return jsonify({"error": "一般使用者只能執行被指派專案的標註工作"}), 403
 

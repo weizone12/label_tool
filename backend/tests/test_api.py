@@ -445,6 +445,55 @@ class ApiTestCase(unittest.TestCase):
         self.assertEqual(cleared["label_id"], "ship")
         self.assertEqual(cleared["attributes"], {target_mmsi_id: ""})
 
+    def test_reid_camera_id_batch_update_preserves_other_bbox_data(self):
+        project = self.client.post("/api/projects", json={
+            "name": "ReID Camera ID batch", "primaryMode": "reid",
+            "labels": [{"id": "ship", "name": "Ship", "color": "#00ff00", "attributes": []}],
+        }).get_json()
+        records = []
+        for index in range(4):
+            response = self.client.post(
+                f"/api/projects/{project['id']}/images",
+                data={"files": (io.BytesIO(b"not-an-image"), f"frame_{index:06d}.jpg")},
+                content_type="multipart/form-data",
+            )
+            record = response.get_json()[0]
+            records.append(record)
+            response = self.client.put(f"/api/projects/{project['id']}/images/{record['id']}/annotation", json={
+                "annotations": [{
+                    "id": str(uuid.uuid4()), "mode": "reid", "label_id": "ship",
+                    "geometry": {"x": 1, "y": 2, "width": 20, "height": 10},
+                    "attributes": {"note": f"keep-{index}"},
+                    "identity_id": f"gid-{index}", "track_id": index + 1, "camera_id": "old",
+                }],
+                "completed": index % 2 == 0,
+            })
+            self.assertEqual(response.status_code, 200)
+
+        expected_calls = [
+            ([records[0]["id"]], "1"),
+            ([records[1]["id"], records[2]["id"]], "2"),
+            ([records[3]["id"]], "1"),
+        ]
+        for image_ids, camera_id in expected_calls:
+            response = self.client.put(f"/api/projects/{project['id']}/reid/camera-id", json={
+                "image_ids": image_ids, "camera_id": camera_id,
+            })
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.get_json(), {
+                "selected_images": len(image_ids), "matched_annotations": len(image_ids),
+                "updated_annotations": len(image_ids), "updated_images": len(image_ids),
+            })
+
+        for index, record in enumerate(records):
+            saved = self.client.get(f"/api/projects/{project['id']}/images/{record['id']}/annotation").get_json()
+            annotation = saved["annotations"][0]
+            self.assertEqual(annotation["camera_id"], "1" if index in {0, 3} else "2")
+            self.assertEqual(annotation["identity_id"], f"gid-{index}")
+            self.assertEqual(annotation["track_id"], index + 1)
+            self.assertEqual(annotation["attributes"], {"note": f"keep-{index}"})
+            self.assertEqual(saved["completed"], index % 2 == 0)
+
     def test_only_reid_accepts_video_input(self):
         reid = self.client.post("/api/projects", json={"name": "reid video", "primaryMode": "reid", "labels": [{"id": "person", "name": "person", "color": "#ff0000"}]}).get_json()
         self.assertEqual(reid["mediaType"], "both")

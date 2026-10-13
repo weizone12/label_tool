@@ -201,10 +201,28 @@ class AuthIntegrationTestCase(unittest.TestCase):
             ).get_json()["annotations"][0]
             self.assertEqual(annotation["attributes"], {"mmsi-attribute": "416035000"})
 
+            camera_response = self.client.put(
+                f"/api/projects/{project['id']}/reid/camera-id",
+                json={"image_ids": [image["id"]], "camera_id": "cam-1"},
+                headers={"X-CSRF-Token": "csrf"},
+            )
+            self.assertEqual(camera_response.status_code, 200)
+            self.assertEqual(camera_response.get_json()["updated_annotations"], 1)
+            annotation = self.client.get(
+                f"/api/projects/{project['id']}/images/{image['id']}/annotation"
+            ).get_json()["annotations"][0]
+            self.assertEqual(annotation["camera_id"], "cam-1")
+
             active_user = unassigned_user
             denied = self.client.put(
                 f"/api/projects/{project['id']}/reid/gid",
                 json={"gid": "gid-1", "label_id": "ship", "mmsi": "123"},
+                headers={"X-CSRF-Token": "csrf"},
+            )
+            self.assertEqual(denied.status_code, 403)
+            denied = self.client.put(
+                f"/api/projects/{project['id']}/reid/camera-id",
+                json={"image_ids": [image["id"]], "camera_id": "cam-2"},
                 headers={"X-CSRF-Token": "csrf"},
             )
             self.assertEqual(denied.status_code, 403)

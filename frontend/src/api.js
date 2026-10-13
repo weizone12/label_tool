@@ -169,5 +169,8 @@ export const api = {
   updateReidByGid: (projectId, data) => request(`/api/projects/${projectId}/reid/gid`, {
     method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data),
   }),
+  updateReidCameraIds: (projectId, data) => request(`/api/projects/${projectId}/reid/camera-id`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data),
+  }),
   imageUrl: (projectId, imageId) => `/api/projects/${projectId}/images/${imageId}/content`,
 }

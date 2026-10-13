@@ -186,10 +186,9 @@ h1, h2, p { margin-top: 0; }
 .mmsi-list { display: grid; gap: 6px; margin-top: 9px; }
 .mmsi-copy-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 6px; }
 .mmsi-copy-row > span { min-width: 0; overflow-wrap: anywhere; border: 1px solid #2b384b; border-radius: 6px; background: #0e1520; color: #eef2f7; padding: 7px 8px; font-size: 12px; }
-.camera-id-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; margin-top: 9px; }
-.camera-id-row input { min-width: 0; background: #0e1520; border: 1px solid #2b384b; border-radius: 6px; color: #eef2f7; padding: 7px 8px; font-size: 12px; }
-.camera-id-row button { border: 1px solid rgba(45,212,191,.45); border-radius: 6px; background: var(--accent-soft); color: #99f6e4; padding: 7px 10px; cursor: pointer; font-size: 12px; }
-.camera-id-row button:disabled { opacity: .4; cursor: not-allowed; }
+.camera-id-bulk-form { margin-top: 10px; }
+.camera-range-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }
+.camera-id-apply-button { width: 100%; }
 .field-hint { display: block; margin-top: 7px; color: var(--muted); font-size: 10px; line-height: 1.5; }
 .field-hint.warning { color: #fbbf24; }
 .gid-bulk-form { margin-top: 10px; }
