@@ -3,7 +3,7 @@ import { ArrowLeft, Check, ChevronLeft, ChevronRight, Copy, Download, Eye, EyeOf
 import { api } from '../api'
 import AnnotationCanvas from './AnnotationCanvas'
 import { createId } from '../uuid'
-import { hydrateSegmentationTopology, insertSharedVertices, updateSharedVertices } from '../segmentationTopology'
+import { hydrateSegmentationTopology, insertSharedVertices, isSegmentation, updateSharedVertices } from '../segmentationTopology'
 import { datasetFrameTime, discoverAisFiles, discoverImageBboxSets, fileDirectory, matchBboxRowsToRecords, mediaFilesFromSelection, parseAisRows, parseImageBboxRows, selectionPath } from '../reidBboxImport'
 import { fitBoxWithinBounds } from '../reidGeometry'
 
@@ -12,6 +12,9 @@ const TOOL_NAMES = {
   semantic_segmentation: '語意分割區域', instance_segmentation: '實例分割區域', reid: 'ReID 人物框', classification: '圖片分類',
 }
 const LABEL_COLORS = ['#fb7185', '#f59e0b', '#84cc16', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6', '#ec4899']
+const COPYABLE_ANNOTATION_TYPES = new Set(['rectangle', 'polygon', 'semantic_segmentation', 'instance_segmentation', 'reid', 'ocr', 'rotated_rectangle'])
+const ANNOTATION_CLIPBOARD_TYPE = 'application/x-miko-annotation'
+const cloneAnnotation = (annotation) => JSON.parse(JSON.stringify(annotation))
 
 const classLabelId = (name, index) => name.trim().toLocaleLowerCase().replace(/[^\p{L}\p{N}_-]+/gu, '-').replace(/^[-_]+|[-_]+$/g, '') || `class-${index + 1}`
 const mmsiAttributeForLabel = (label) => label?.attributes?.find((attribute) => String(attribute.name || attribute.id || '').trim().toLocaleLowerCase() === 'mmsi')
@@ -114,7 +117,10 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
   const [selectedId, setSelectedId] = useState(null)
   const [activeLabelId, setActiveLabelId] = useState(project.labels[0]?.id || '')
   const tool = project.primaryMode
+  const reidEditOnly = editingProject && tool === 'reid'
   const [saveState, setSaveState] = useState('已儲存')
+  const [annotationReady, setAnnotationReady] = useState(false)
+  const [clipboardStatus, setClipboardStatus] = useState('')
   const [resetToken, setResetToken] = useState(0)
   const [error, setError] = useState('')
   const [currentFrame, setCurrentFrame] = useState(0)
@@ -158,6 +164,9 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
   const bboxInputRef = useRef(null)
   const selectedEditorRef = useRef(null)
   const mmsiCopyTimerRef = useRef(null)
+  const annotationClipboardRef = useRef(null)
+  const clipboardStatusTimerRef = useRef(null)
+  const pendingPasteImageIdRef = useRef(null)
   const filteredImages = images.filter((item) => progressFilter === 'all' || (progressFilter === 'completed' ? item.completed : !item.completed))
   const currentImage = filteredImages[index] || filteredImages[0]
   const nextImageToPreload = filteredImages[index + 1]
@@ -200,8 +209,10 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
   useEffect(() => { loadImages() }, [loadImages])
 
   useEffect(() => {
-    if (!currentImage) { setDocument({ annotations: [], classifications: [], revision: 0 }); return }
+    if (!currentImage) { setDocument({ annotations: [], classifications: [], revision: 0 }); setAnnotationReady(false); return }
     let cancelled = false
+    if (pendingPasteImageIdRef.current && pendingPasteImageIdRef.current !== currentImage.id) pendingPasteImageIdRef.current = null
+    setAnnotationReady(false)
     setVideoMetadata(null)
     setDocument({ annotations: [], classifications: [], revision: 0 })
     setPast([]); setFuture([]); setSelectedId(null); setCurrentFrame(0); setAisRecords([]); setSelectedMmsi(''); setAisSourceName('')
@@ -213,7 +224,7 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
       const materialized = { ...data, annotations }
       const restoredAisRecords = Array.isArray(data.editor_state?.mmsi_records) ? data.editor_state.mmsi_records : []
       const restoredMmsiValues = [...new Set(restoredAisRecords.map((item) => item.mmsi))].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
-      setDocument(materialized); setPast([]); setFuture([]); setSelectedId(null); setCurrentFrame(0); setAisRecords(restoredAisRecords); setSelectedMmsi(restoredMmsiValues[0] || ''); setAisSourceName(data.editor_state?.mmsi_source_name || ''); setSaveState('已儲存')
+      setDocument(materialized); setPast([]); setFuture([]); setSelectedId(null); setCurrentFrame(0); setAisRecords(restoredAisRecords); setSelectedMmsi(restoredMmsiValues[0] || ''); setAisSourceName(data.editor_state?.mmsi_source_name || ''); setSaveState('已儲存'); setAnnotationReady(true)
       if (JSON.stringify(sourceAnnotations) !== JSON.stringify(data.annotations)) {
         api.saveAnnotation(project.id, currentImage.id, materialized).then((saved) => {
           if (!cancelled) setDocument((current) => ({ ...current, revision: saved.revision, updatedAt: saved.updatedAt }))
@@ -278,6 +289,65 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
     setSelectedId(null)
   }, [commit, currentImage?.height, currentImage?.width, editingProject, selectedId, tool])
 
+  const showClipboardStatus = useCallback((message) => {
+    setClipboardStatus(message)
+    window.clearTimeout(clipboardStatusTimerRef.current)
+    clipboardStatusTimerRef.current = window.setTimeout(() => setClipboardStatus(''), 1800)
+  }, [])
+
+  const copySelectedAnnotation = useCallback(() => {
+    const annotation = document.annotations.find((item) => item.id === selectedId)
+    if (!annotation || !COPYABLE_ANNOTATION_TYPES.has(annotation.type)) return false
+    annotationClipboardRef.current = cloneAnnotation(annotation)
+    showClipboardStatus('已複製選取的標註')
+    return true
+  }, [document.annotations, selectedId, showClipboardStatus])
+
+  const pasteSelectedAnnotation = useCallback(() => {
+    const source = annotationClipboardRef.current
+    if (!source || !currentImage || !COPYABLE_ANNOTATION_TYPES.has(source.type)) return false
+    if (!annotationReady) {
+      pendingPasteImageIdRef.current = currentImage.id
+      showClipboardStatus('標註載入中，完成後會自動貼上')
+      return true
+    }
+    const id = createId()
+    const pasted = {
+      ...cloneAnnotation(source),
+      id,
+      points: source.type === 'reid'
+        ? fitBoxWithinBounds(source.points, currentImage.width, currentImage.height)
+        : source.points.map((point) => isSegmentation(source.type)
+          ? { x: point.x, y: point.y, vertexId: createId() }
+          : { ...point }),
+      hidden: false,
+      locked: false,
+      created_at: new Date().toISOString(),
+    }
+    if (source.type === 'reid') {
+      pasted.frame_id = currentImage.mediaType === 'video' ? currentFrame : null
+      pasted.keyframe = currentImage.mediaType === 'video'
+      pasted.generated = false
+      pasted.interpolated = false
+      delete pasted.source_class
+      delete pasted.confidence
+      delete pasted.source_detection_index
+    }
+    commit((current) => {
+      const annotations = [...current.annotations, pasted]
+      return { ...current, annotations: source.type === 'reid' ? regenerateReidAnnotations(annotations, currentImage.width, currentImage.height) : annotations }
+    })
+    setSelectedId(id)
+    showClipboardStatus('已貼上標註')
+    return true
+  }, [annotationReady, commit, currentFrame, currentImage, showClipboardStatus])
+
+  useEffect(() => {
+    if (!annotationReady || pendingPasteImageIdRef.current !== currentImage?.id) return
+    pendingPasteImageIdRef.current = null
+    pasteSelectedAnnotation()
+  }, [annotationReady, currentImage?.id, pasteSelectedAnnotation])
+
   const navigate = useCallback((delta) => {
     if (!filteredImages.length) return
     if (saveState === '尚未儲存') save()
@@ -305,11 +375,18 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
   }, [currentImage, document, filteredImages, progressFilter, save])
 
   useEffect(() => {
+    const isTextEditor = (target) => ['INPUT', 'TEXTAREA'].includes(target?.tagName) || target?.isContentEditable
     const handler = (event) => {
+      const modifier = event.ctrlKey || event.metaKey
+      const shortcut = event.code === 'KeyC' ? 'c' : event.code === 'KeyV' ? 'v' : event.key.toLowerCase()
+      if (draftActiveRef.current && modifier && ['c', 'v'].includes(shortcut)) { event.preventDefault(); return }
       if (draftActiveRef.current && (['Backspace', 'Delete'].includes(event.key) || ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z'))) return
-      const typing = ['INPUT', 'TEXTAREA', 'SELECT'].includes(window.document.activeElement?.tagName)
+      const activeElement = window.document.activeElement
+      const typing = ['INPUT', 'TEXTAREA', 'SELECT'].includes(activeElement?.tagName) || activeElement?.isContentEditable
+      const editingText = isTextEditor(activeElement)
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') { event.preventDefault(); event.shiftKey ? redo() : undo(); return }
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'y') { event.preventDefault(); redo(); return }
+      if (modifier && shortcut === 'v' && !event.repeat && !editingText) { if (pasteSelectedAnnotation()) event.preventDefault(); return }
       if (typing) return
       if (['Backspace', 'Delete'].includes(event.key)) { event.preventDefault(); deleteSelected() }
       else if (['a', 'A', 'ArrowLeft'].includes(event.key)) navigate(-1)
@@ -317,9 +394,34 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
       else if (['r', 'R'].includes(event.key)) setResetToken((value) => value + 1)
       else if (['f', 'F'].includes(event.key) && !event.repeat) { event.preventDefault(); finishAndNext() }
     }
-    window.addEventListener('keydown', handler)
-    return () => window.removeEventListener('keydown', handler)
-  }, [deleteSelected, finishAndNext, navigate, redo, undo])
+    const copyHandler = (event) => {
+      if (isTextEditor(event.target)) return
+      if (draftActiveRef.current) { event.preventDefault(); return }
+      if (!copySelectedAnnotation()) return
+      event.clipboardData?.setData(ANNOTATION_CLIPBOARD_TYPE, JSON.stringify(annotationClipboardRef.current))
+      event.clipboardData?.setData('text/plain', 'MIKO annotation')
+      event.preventDefault()
+    }
+    const pasteHandler = (event) => {
+      if (isTextEditor(event.target)) return
+      if (draftActiveRef.current) { event.preventDefault(); return }
+      if (!annotationClipboardRef.current) {
+        const serialized = event.clipboardData?.getData(ANNOTATION_CLIPBOARD_TYPE)
+        if (serialized) {
+          try { annotationClipboardRef.current = JSON.parse(serialized) } catch { /* ignore invalid clipboard data */ }
+        }
+      }
+      if (pasteSelectedAnnotation()) event.preventDefault()
+    }
+    window.addEventListener('keydown', handler, true)
+    window.addEventListener('copy', copyHandler, true)
+    window.addEventListener('paste', pasteHandler, true)
+    return () => {
+      window.removeEventListener('keydown', handler, true)
+      window.removeEventListener('copy', copyHandler, true)
+      window.removeEventListener('paste', pasteHandler, true)
+    }
+  }, [copySelectedAnnotation, deleteSelected, finishAndNext, navigate, pasteSelectedAnnotation, redo, undo])
 
   const handleDraftActiveChange = useCallback((active) => { draftActiveRef.current = active }, [])
 
@@ -582,7 +684,6 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
   const classificationLabels = project.labels.filter((label) => !label.system)
   const activeLabel = project.labels.find((label) => label.id === activeLabelId)
   const visibleAnnotations = currentImage?.mediaType === 'video' ? annotationsAtFrame(document.annotations, currentFrame) : document.annotations
-  const reidEditOnly = editingProject && tool === 'reid'
   const frameTimeline = reidEditOnly ? (document.editor_state?.frame_timeline || []) : []
   const reidAnnotations = document.annotations.filter((item) => item.type === 'reid')
   const cameraIdValues = [...new Set(reidAnnotations.map((item) => String(item.camera_id ?? '').trim()))]
@@ -830,7 +931,7 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
             const label = project.labels.find((item) => item.id === annotation.labelId)
             return <div className="annotation-list-item" key={annotation.id}><button className={selectedId === annotation.id ? 'active' : ''} onClick={() => setSelectedId(annotation.id)}><i style={{ background: label?.color }} /><span>{label?.name || '未命名'}<small>{TOOL_NAMES[annotation.type]} #{itemIndex + 1}</small></span>{annotation.hidden ? <EyeOff size={14} /> : <Eye size={14} />}</button>{selectedId === annotation.id && selectionEditor}</div>
           })}</div></section>}
-          <section className="shortcut-card"><span className="panel-label">快捷鍵</span><div><kbd>F</kbd>儲存、標記完成並前往下一張</div><div><kbd>A</kbd><kbd>D</kbd>切換圖片</div><div><kbd>R</kbd>重設視角</div><div><kbd>Del</kbd>刪除選取</div><div><kbd>Ctrl Z/Y</kbd>復原／重做</div><div><kbd>Alt 點擊</kbd>循環選取</div><div><kbd>Shift 點擊</kbd>在重疊處強制標註</div></section>
+          <section className="shortcut-card"><span className="panel-label">快捷鍵</span><div><kbd>F</kbd>儲存、標記完成並前往下一張</div><div><kbd>A</kbd><kbd>D</kbd>切換圖片</div><div><kbd>R</kbd>重設視角</div><div><kbd>Del</kbd>刪除選取</div>{COPYABLE_ANNOTATION_TYPES.has(tool) && <div><kbd>Ctrl C/V</kbd>複製／貼上選取標註</div>}<div><kbd>Ctrl Z/Y</kbd>復原／重做</div><div><kbd>Alt 點擊</kbd>循環選取</div><div><kbd>Shift 點擊</kbd>在重疊處強制標註</div>{clipboardStatus && <div className="clipboard-message">{clipboardStatus}</div>}</section>
         </aside>
       </div>
     </main>

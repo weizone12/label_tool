@@ -187,6 +187,7 @@ h1, h2, p { margin-top: 0; }
 .batch-result { margin-top: 9px; border: 1px solid rgba(45,212,191,.3); border-radius: 6px; background: var(--accent-soft); color: #99f6e4; padding: 7px 9px; font-size: 11px; line-height: 1.45; }
 .shortcut-card { font-size: 11px; color: var(--muted); }
 .shortcut-card > div { display: flex; align-items: center; gap: 5px; margin-top: 7px; }
+.shortcut-card > .clipboard-message { color: #99f6e4; }
 .assignment-overlay { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; padding: 24px; background: rgba(4,10,18,.72); }
 .assignment-dialog { width: min(500px, 100%); max-height: 80vh; overflow: auto; border: 1px solid var(--border); border-radius: 14px; background: var(--panel); padding: 24px; box-shadow: 0 24px 80px rgba(0,0,0,.45); }
 .assignment-dialog h2 { margin: 0 0 5px; }
