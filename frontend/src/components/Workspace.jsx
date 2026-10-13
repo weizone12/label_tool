@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ArrowLeft, Check, ChevronLeft, ChevronRight, Copy, Download, Eye, EyeOff, FolderOpen, ImagePlus, Lock, Pencil, RotateCcw, Save, Trash2, Unlock, X } from 'lucide-react'
 import { api } from '../api'
 import AnnotationCanvas from './AnnotationCanvas'
@@ -163,6 +163,8 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
   const folderInputRef = useRef(null)
   const bboxInputRef = useRef(null)
   const selectedEditorRef = useRef(null)
+  const reidLidInputRef = useRef(null)
+  const reidGidInputRef = useRef(null)
   const mmsiCopyTimerRef = useRef(null)
   const annotationClipboardRef = useRef(null)
   const clipboardStatusTimerRef = useRef(null)
@@ -444,6 +446,17 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
     window.requestAnimationFrame(() => selectedEditorRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }))
   }, [selectedId, selected?.labelId])
 
+  useEffect(() => {
+    if (!reidEditOnly || !selectedId) return
+    const selectedAnnotation = document.annotations.find((item) => item.id === selectedId && item.type === 'reid')
+    if (!selectedAnnotation) return
+    window.requestAnimationFrame(() => {
+      const input = String(selectedAnnotation.track_id ?? '').trim() ? reidGidInputRef.current : reidLidInputRef.current
+      input?.focus()
+      input?.select()
+    })
+  }, [reidEditOnly, selectedId])
+
   const importImageBboxSets = async (bboxSets, aisFiles, uploadedRecords) => {
     if (!bboxSets.length) return
     setImportingBboxes(true)
@@ -684,6 +697,16 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
   const classificationLabels = project.labels.filter((label) => !label.system)
   const activeLabel = project.labels.find((label) => label.id === activeLabelId)
   const visibleAnnotations = currentImage?.mediaType === 'video' ? annotationsAtFrame(document.annotations, currentFrame) : document.annotations
+  const reidTabOrder = useMemo(() => {
+    if (!reidEditOnly) return []
+    return visibleAnnotations.filter((item) => item.type === 'reid').map((item, originalIndex) => {
+      const lid = String(item.track_id ?? '').trim()
+      const gid = String(item.identity_id ?? '').trim()
+      return { id: item.id, originalIndex, tier: lid ? 0 : gid ? 1 : 2, value: lid || gid }
+    }).sort((first, second) => first.tier - second.tier
+      || (first.tier < 2 ? first.value.localeCompare(second.value, undefined, { numeric: true, sensitivity: 'base' }) : 0)
+      || first.originalIndex - second.originalIndex).map((item) => item.id)
+  }, [reidEditOnly, visibleAnnotations])
   const frameTimeline = reidEditOnly ? (document.editor_state?.frame_timeline || []) : []
   const reidAnnotations = document.annotations.filter((item) => item.type === 'reid')
   const cameraIdValues = [...new Set(reidAnnotations.map((item) => String(item.camera_id ?? '').trim()))]
@@ -696,6 +719,23 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
       ? { ...item, x: item.x * currentImage.width / videoMetadata.width, y: item.y * currentImage.height / videoMetadata.height }
       : item)
     : []
+
+  useEffect(() => {
+    if (!reidEditOnly || !reidTabOrder.length) return undefined
+    const handleTabSelection = (event) => {
+      if (event.key !== 'Tab' || event.ctrlKey || event.metaKey || event.altKey) return
+      event.preventDefault()
+      event.stopImmediatePropagation()
+      const currentIndex = reidTabOrder.indexOf(selectedId)
+      const direction = event.shiftKey ? -1 : 1
+      const nextIndex = currentIndex < 0
+        ? (direction > 0 ? 0 : reidTabOrder.length - 1)
+        : (currentIndex + direction + reidTabOrder.length) % reidTabOrder.length
+      setSelectedId(reidTabOrder[nextIndex])
+    }
+    window.addEventListener('keydown', handleTabSelection, true)
+    return () => window.removeEventListener('keydown', handleTabSelection, true)
+  }, [reidEditOnly, reidTabOrder, selectedId])
 
   useEffect(() => {
     const values = [...new Set(document.annotations.filter((item) => item.type === 'reid').map((item) => String(item.camera_id ?? '').trim()))]
@@ -869,7 +909,7 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
 
   const selectionEditor = selected && <section ref={selectedEditorRef} className="selection-editor"><div className="selection-title"><span className="panel-label">選取項目</span>{!reidEditOnly && <div><button className="icon-button" title={selected.hidden ? '顯示' : '隱藏'} onClick={() => updateSelected({ hidden: !selected.hidden })}>{selected.hidden ? <EyeOff size={15} /> : <Eye size={15} />}</button><button className="icon-button" title={selected.locked ? '解鎖' : '鎖定'} onClick={() => updateSelected({ locked: !selected.locked })}>{selected.locked ? <Lock size={15} /> : <Unlock size={15} />}</button><button className="icon-button danger" onClick={deleteSelected}><Trash2 size={15} /></button></div>}</div>
     {selected.type !== 'ocr' && <label className="field small"><span>Label</span><select value={selected.labelId} onChange={(e) => updateSelected({ labelId: e.target.value })}>{project.labels.filter((label) => !label.system).map((label) => <option key={label.id} value={label.id}>{label.name}</option>)}</select></label>}
-    {selected.type === 'reid' && <><label className="field small"><span>Identity ID（GID／跨圖片身分）</span><input value={selected.identity_id || ''} onChange={(e) => updateSelected({ identity_id: e.target.value })} placeholder="例如 person_001" /></label><label className="field small"><span>Track ID（LID／同影片軌跡）</span><input value={selected.track_id || ''} onChange={(e) => updateSelected({ track_id: e.target.value })} /></label><label className="field small"><span>Camera ID</span><input value={selected.camera_id || ''} onChange={(e) => updateSelected({ camera_id: e.target.value })} /></label><label className="field small"><span>Video ID</span><input value={selected.video_id || ''} onChange={(e) => updateSelected({ video_id: e.target.value })} /></label>{currentImage?.mediaType === 'video' && <label className="field small"><span>Frame ID</span><input value={selected.frame_id ?? ''} readOnly /></label>}{currentImage?.mediaType === 'video' && !reidEditOnly && <label className="classification-toggle"><input type="checkbox" checked={Boolean(selected.keyframe)} onChange={(e) => updateSelected({ keyframe: e.target.checked })} /><span><strong>關鍵影格</strong><small>此框為追蹤軌跡的明確標註點</small></span></label>}</>}
+    {selected.type === 'reid' && <><label className="field small"><span>Identity ID（GID／跨圖片身分）</span><input ref={reidGidInputRef} value={selected.identity_id || ''} onChange={(e) => updateSelected({ identity_id: e.target.value })} placeholder="例如 person_001" /></label><label className="field small"><span>Track ID（LID／同影片軌跡）</span><input ref={reidLidInputRef} value={selected.track_id || ''} onChange={(e) => updateSelected({ track_id: e.target.value })} /></label><label className="field small"><span>Camera ID</span><input value={selected.camera_id || ''} onChange={(e) => updateSelected({ camera_id: e.target.value })} /></label><label className="field small"><span>Video ID</span><input value={selected.video_id || ''} onChange={(e) => updateSelected({ video_id: e.target.value })} /></label>{currentImage?.mediaType === 'video' && <label className="field small"><span>Frame ID</span><input value={selected.frame_id ?? ''} readOnly /></label>}{currentImage?.mediaType === 'video' && !reidEditOnly && <label className="classification-toggle"><input type="checkbox" checked={Boolean(selected.keyframe)} onChange={(e) => updateSelected({ keyframe: e.target.checked })} /><span><strong>關鍵影格</strong><small>此框為追蹤軌跡的明確標註點</small></span></label>}</>}
     {selectedLabel?.attributes.map((attribute) => <label className="field small" key={attribute.id}><span>{attribute.name}</span><input ref={selected.type === 'ocr' && attribute.id === 'transcription' ? ocrInputRef : null} type={attribute.type === 'number' ? 'number' : 'text'} value={selected.attributes?.[attribute.id] ?? ''} onChange={(e) => updateSelected({ attributes: { ...selected.attributes, [attribute.id]: attribute.type === 'number' ? (e.target.value === '' ? null : Number(e.target.value)) : e.target.value } })} placeholder={selected.type === 'ocr' ? '輸入框內文字' : ''} /></label>)}
   </section>
 
@@ -931,7 +971,7 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
             const label = project.labels.find((item) => item.id === annotation.labelId)
             return <div className="annotation-list-item" key={annotation.id}><button className={selectedId === annotation.id ? 'active' : ''} onClick={() => setSelectedId(annotation.id)}><i style={{ background: label?.color }} /><span>{label?.name || '未命名'}<small>{TOOL_NAMES[annotation.type]} #{itemIndex + 1}</small></span>{annotation.hidden ? <EyeOff size={14} /> : <Eye size={14} />}</button>{selectedId === annotation.id && selectionEditor}</div>
           })}</div></section>}
-          <section className="shortcut-card"><span className="panel-label">快捷鍵</span><div><kbd>F</kbd>儲存、標記完成並前往下一張</div><div><kbd>A</kbd><kbd>D</kbd>切換圖片</div><div><kbd>R</kbd>重設視角</div><div><kbd>Del</kbd>刪除選取</div>{COPYABLE_ANNOTATION_TYPES.has(tool) && <div><kbd>Ctrl C/V</kbd>複製／貼上選取標註</div>}<div><kbd>Ctrl Z/Y</kbd>復原／重做</div><div><kbd>Alt 點擊</kbd>循環選取</div><div><kbd>Shift 點擊</kbd>在重疊處強制標註</div>{clipboardStatus && <div className="clipboard-message">{clipboardStatus}</div>}</section>
+          <section className="shortcut-card"><span className="panel-label">快捷鍵</span><div><kbd>F</kbd>儲存、標記完成並前往下一張</div><div><kbd>A</kbd><kbd>D</kbd>切換圖片</div><div><kbd>R</kbd>重設視角</div><div><kbd>Del</kbd>刪除選取</div>{reidEditOnly && <div><kbd>Tab</kbd>依 LID／GID 循環選框</div>}{COPYABLE_ANNOTATION_TYPES.has(tool) && <div><kbd>Ctrl C/V</kbd>複製／貼上選取標註</div>}<div><kbd>Ctrl Z/Y</kbd>復原／重做</div><div><kbd>Alt 點擊</kbd>循環選取</div><div><kbd>Shift 點擊</kbd>在重疊處強制標註</div>{clipboardStatus && <div className="clipboard-message">{clipboardStatus}</div>}</section>
         </aside>
       </div>
     </main>
