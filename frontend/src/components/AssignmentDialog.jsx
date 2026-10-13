@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api'
 
-export default function AssignmentDialog({ project, onClose }) {
+export default function AssignmentDialog({ project, onClose, onSaved }) {
   const [users, setUsers] = useState([])
   const [selected, setSelected] = useState(new Set())
   const [error, setError] = useState('')
@@ -24,7 +24,11 @@ export default function AssignmentDialog({ project, onClose }) {
 
   const save = async () => {
     setSaving(true); setError('')
-    try { await api.updateAssignments(project.id, [...selected]); onClose() }
+    try {
+      const userIds = await api.updateAssignments(project.id, [...selected])
+      onSaved?.(userIds)
+      onClose()
+    }
     catch (err) { setError(err.message); setSaving(false) }
   }
 

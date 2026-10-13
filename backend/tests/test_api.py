@@ -196,6 +196,44 @@ class ApiTestCase(unittest.TestCase):
             self.assertEqual(listed["pendingCount"], 2 - expected_completed)
             self.assertEqual(listed["completed"], expected_completed == 2)
 
+    def test_project_completion_updates_all_images_and_preserves_annotations(self):
+        project = self.client.post("/api/projects", json={
+            "name": "批次完成專案", "primaryMode": "rectangle",
+            "labels": [{"id": "item", "name": "物件", "color": "#ff0000", "attributes": []}],
+        }).get_json()
+        source_dir = Path(self.temp_dir.name) / "bulk-completion-source"
+        source_dir.mkdir()
+        sources = []
+        for filename in ("one.png", "two.png"):
+            source = source_dir / filename
+            Image.new("RGB", (20, 10), "white").save(source)
+            sources.append(source)
+        records = self.app_module.register_source_images(self.app_module.project_dir(project["id"]), sources, source_dir)
+        annotation_id = str(uuid.uuid4())
+        response = self.client.put(f"/api/projects/{project['id']}/images/{records[0]['id']}/annotation", json={
+            "annotations": [{
+                "id": annotation_id, "mode": "rectangle", "label_id": "item",
+                "geometry": {"x": 1, "y": 2, "width": 3, "height": 4},
+                "attributes": {}, "metadata": {},
+            }],
+            "completed": False,
+        })
+        self.assertEqual(response.status_code, 200)
+
+        completed = self.client.put(f"/api/projects/{project['id']}/completion", json={"completed": True})
+        self.assertEqual(completed.status_code, 200)
+        self.assertEqual(completed.get_json(), {"completed": True, "updated": 2, "total": 2})
+        self.assertTrue(all(item["completed"] for item in self.client.get(f"/api/projects/{project['id']}/images").get_json()))
+        saved = self.client.get(f"/api/projects/{project['id']}/images/{records[0]['id']}/annotation").get_json()
+        self.assertEqual(saved["annotations"][0]["id"], annotation_id)
+
+        reopened = self.client.put(f"/api/projects/{project['id']}/completion", json={"completed": False})
+        self.assertEqual(reopened.status_code, 200)
+        self.assertEqual(reopened.get_json(), {"completed": False, "updated": 2, "total": 2})
+        self.assertFalse(any(item["completed"] for item in self.client.get(f"/api/projects/{project['id']}/images").get_json()))
+        saved = self.client.get(f"/api/projects/{project['id']}/images/{records[0]['id']}/annotation").get_json()
+        self.assertEqual(saved["annotations"][0]["id"], annotation_id)
+
     def test_ocr_project_gets_internal_text_label(self):
         response = self.client.post("/api/projects", json={
             "name": "OCR 專案", "primaryMode": "ocr", "labels": [],

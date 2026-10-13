@@ -50,6 +50,16 @@ def assigned_project_ids(user_id: str) -> set[str]:
         )}
 
 
+def assigned_user_ids_by_project() -> dict[str, list[str]]:
+    assignments = {}
+    with connection() as db:
+        for row in db.execute(
+            "SELECT project_id, user_id FROM project_assignments ORDER BY assigned_at"
+        ):
+            assignments.setdefault(row["project_id"], []).append(row["user_id"])
+    return assignments
+
+
 def user_is_assigned(project_id: str, user_id: str) -> bool:
     with connection() as db:
         return db.execute(
@@ -88,10 +98,11 @@ def register_project_access(app: Flask) -> None:
         suffix = "/".join(parts[4:])
         annotation_access = suffix.endswith("/annotation") and request.method in {"GET", "PUT"}
         reid_gid_batch_access = suffix == "reid/gid" and request.method == "PUT"
+        bulk_completion_access = suffix == "completion" and request.method == "PUT"
         read_access = request.method == "GET" and (
             suffix == "" or suffix == "images" or suffix == "download" or suffix.endswith("/content")
         )
-        if annotation_access or reid_gid_batch_access or read_access:
+        if annotation_access or reid_gid_batch_access or bulk_completion_access or read_access:
             return None
         return jsonify({"error": "一般使用者只能執行被指派專案的標註工作"}), 403
 

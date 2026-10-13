@@ -32,9 +32,18 @@ export default function App() {
   const [reconciling, setReconciling] = useState(false)
   const [notice, setNotice] = useState('')
   const [activeGroup, setActiveGroup] = useState('')
+  const [managedUsers, setManagedUsers] = useState([])
+  const [assignedUserFilter, setAssignedUserFilter] = useState('')
 
   const refresh = async () => {
-    try { setProjects(await api.listProjects()) } catch (err) { setError(err.message) }
+    try {
+      const [nextProjects, nextUsers] = await Promise.all([
+        api.listProjects(),
+        user.is_admin ? api.listManagedUsers() : Promise.resolve([]),
+      ])
+      setProjects(nextProjects)
+      setManagedUsers(nextUsers)
+    } catch (err) { setError(err.message) }
   }
   useEffect(() => { refresh() }, [])
 
@@ -69,11 +78,18 @@ export default function App() {
     const segments = groupSegments(project.group)
     return segments.map((_, index) => groupPath(segments.slice(0, index + 1)))
   }))].sort((a, b) => a.localeCompare(b, 'zh-TW', { numeric: true, sensitivity: 'base' }))
+  const projectUsers = managedUsers.filter((item) => !item.is_admin).sort((a, b) => compareNames(a.display_name || a.username, b.display_name || b.username))
+  const usersById = new Map(projectUsers.map((item) => [item.id, item]))
+  const filteredByUser = assignedUserFilter === '__unassigned__'
+    ? projects.filter((project) => !(project.assignedUserIds || []).length)
+    : assignedUserFilter
+      ? projects.filter((project) => (project.assignedUserIds || []).includes(assignedUserFilter))
+      : projects
   const activeSegments = groupSegments(activeGroup)
   const visibleProjects = activeGroup
-    ? projects.filter((project) => isSamePath(project.group, activeGroup)).sort((a, b) => compareNames(a.name, b.name))
-    : projects.filter((project) => groupSegments(project.group).length === 0)
-  const childGroups = [...new Set(projects.flatMap((project) => {
+    ? filteredByUser.filter((project) => isSamePath(project.group, activeGroup)).sort((a, b) => compareNames(a.name, b.name))
+    : filteredByUser.filter((project) => groupSegments(project.group).length === 0)
+  const childGroups = [...new Set(filteredByUser.flatMap((project) => {
     const segments = groupSegments(project.group)
     if (segments.length <= activeSegments.length || !isWithinPath(project.group, activeGroup)) return []
     return [groupPath(segments.slice(0, activeSegments.length + 1))]
@@ -87,6 +103,10 @@ export default function App() {
       }}><Trash2 size={16} /></button></>}</div></div>
       <h2>{project.name}</h2>
       <div className="mode-chips"><span>{project.projectType === 'editing' ? '純修改專案' : '標註專案'}</span><span>{modeName(project.primaryMode)}</span></div>
+      {user.is_admin && <div className="project-assignees"><Users size={14} /><div>{(project.assignedUserIds || []).length ? project.assignedUserIds.map((userId) => {
+        const assignedUser = usersById.get(userId)
+        return <span className="project-assignee" key={userId} title={assignedUser?.username || userId}>{assignedUser?.display_name || assignedUser?.username || '未知使用者'}</span>
+      }) : <span className="project-unassigned">未指派</span>}</div></div>}
       <small>更新於 {new Date(project.updatedAt).toLocaleString('zh-TW')}</small>
     </article>
   )
@@ -109,15 +129,16 @@ export default function App() {
       </header>
       {error && <div className="error-banner">{error}</div>}
       {notice && <div className="success-banner">{notice}</div>}
+      {user.is_admin && projects.length > 0 && <div className="project-filter-bar"><Users size={17} /><label><span>依指派使用者篩選</span><select value={assignedUserFilter} onChange={(event) => { setAssignedUserFilter(event.target.value); setActiveGroup('') }}><option value="">全部專案</option><option value="__unassigned__">未指派</option>{projectUsers.map((item) => <option key={item.id} value={item.id}>{item.display_name || item.username}{item.status !== 'active' ? '（已停用）' : ''}</option>)}</select></label><em>{filteredByUser.length} 個專案</em></div>}
       {activeGroup && <div className="group-toolbar"><button className="text-button" onClick={() => setActiveGroup(groupPath(activeSegments.slice(0, -1)))}><ArrowLeft size={17} />返回上一層</button><div className="group-breadcrumbs"><button onClick={() => setActiveGroup('')}>所有專案</button>{activeSegments.map((part, index) => <span key={groupPath(activeSegments.slice(0, index + 1))}><ChevronRight size={14} /><button onClick={() => setActiveGroup(groupPath(activeSegments.slice(0, index + 1)))}>{part}</button></span>)}<em>{visibleProjects.length} 個專案</em></div></div>}
       <section className="project-grid">
         {projects.length === 0 ? (
           user.is_admin ? <button className="empty-state" onClick={() => setCreating(true)}>
             <Boxes size={42} /><strong>尚無標註專案</strong><span>建立第一個專案並載入圖片資料集</span>
           </button> : <div className="empty-state"><Boxes size={42} /><strong>目前沒有被指派的專案</strong><span>請聯絡管理員指派專案</span></div>
-        ) : <>
+        ) : filteredByUser.length === 0 ? <div className="empty-state"><Users size={42} /><strong>沒有符合此篩選的專案</strong><span>請選擇其他使用者或查看全部專案</span></div> : <>
           {childGroups.map((groupName) => {
-            const grouped = projects.filter((project) => isWithinPath(project.group, groupName))
+            const grouped = filteredByUser.filter((project) => isWithinPath(project.group, groupName))
             const imageCount = grouped.reduce((total, project) => total + (project.imageCount || 0), 0)
             return <article className="project-card group-card" key={groupName} onClick={() => setActiveGroup(groupName)}>
               <div className="project-card-top"><span>{grouped.length} 個專案 · {imageCount} 張圖片</span><Folder size={18} /></div>
@@ -130,7 +151,7 @@ export default function App() {
           {activeGroup && visibleProjects.length === 0 && childGroups.length === 0 && <div className="empty-state"><Folder size={42} /><strong>群組內沒有專案</strong></div>}
         </>}
       </section>
-      {assigning && <AssignmentDialog project={assigning} onClose={() => setAssigning(null)} />}
+      {assigning && <AssignmentDialog project={assigning} onClose={() => setAssigning(null)} onSaved={(userIds) => setProjects((items) => items.map((project) => project.id === assigning.id ? { ...project, assignedUserIds: userIds } : project))} />}
     </main>
   )
 }

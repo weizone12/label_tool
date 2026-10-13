@@ -114,6 +114,9 @@ export const api = {
     URL.revokeObjectURL(url)
   },
   listImages: (id) => request(`/api/projects/${id}/images`),
+  updateAllCompletion: (id, completed) => request(`/api/projects/${id}/completion`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ completed }),
+  }),
   selectImageFiles: (id) => request(`/api/projects/${id}/images/select-files`, { method: 'POST' }),
   selectImageFolder: (id) => request(`/api/projects/${id}/images/select-folder`, { method: 'POST' }),
   registerImagePaths: (id, paths, root) => request(`/api/projects/${id}/images/register-paths`, {

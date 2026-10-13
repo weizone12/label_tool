@@ -89,10 +89,16 @@ class AuthIntegrationTestCase(unittest.TestCase):
             }, headers={"X-CSRF-Token": "csrf"}).get_json()
             response = self.client.put(f"/api/projects/{first['id']}/assignments", json={"user_ids": [user["id"]]}, headers={"X-CSRF-Token": "csrf"})
             self.assertEqual(response.status_code, 200)
+            admin_projects = self.client.get("/api/projects").get_json()
+            assigned_project = next(project for project in admin_projects if project["id"] == first["id"])
+            hidden_project = next(project for project in admin_projects if project["id"] == second["id"])
+            self.assertEqual(assigned_project["assignedUserIds"], [user["id"]])
+            self.assertEqual(hidden_project["assignedUserIds"], [])
 
             active_user = user
             projects = self.client.get("/api/projects").get_json()
             self.assertEqual([project["id"] for project in projects], [first["id"]])
+            self.assertNotIn("assignedUserIds", projects[0])
             forbidden_create = self.client.post("/api/projects", json={"name": "nope"}, headers={"X-CSRF-Token": "csrf"})
             self.assertEqual(forbidden_create.status_code, 403)
             forbidden_settings = self.client.put(f"/api/projects/{first['id']}", json={"name": "changed"}, headers={"X-CSRF-Token": "csrf"})
@@ -202,6 +208,39 @@ class AuthIntegrationTestCase(unittest.TestCase):
                 headers={"X-CSRF-Token": "csrf"},
             )
             self.assertEqual(denied.status_code, 403)
+
+    def test_assigned_user_can_update_project_completion(self):
+        admin = {"id": "admin-id", "username": "admin", "is_admin": True,
+                 "status": "active", "must_change_password": False}
+        user = {"id": "user-id", "username": "worker", "is_admin": False,
+                "status": "active", "must_change_password": False}
+        active_user = admin
+
+        def verify(_request, timeout=None):
+            return FakeAuthResponse(active_user)
+
+        with patch("auth_integration.urllib.request.urlopen", side_effect=verify):
+            project = self.client.post("/api/projects", json={
+                "name": "completion batch", "primaryMode": "rectangle", "labels": [],
+            }, headers={"X-CSRF-Token": "csrf"}).get_json()
+            self.client.put(
+                f"/api/projects/{project['id']}/assignments",
+                json={"user_ids": [user["id"]]}, headers={"X-CSRF-Token": "csrf"},
+            )
+            self.client.post(
+                f"/api/projects/{project['id']}/images",
+                data={"files": (io.BytesIO(b"not-an-image"), "photo.jpg")},
+                content_type="multipart/form-data", headers={"X-CSRF-Token": "csrf"},
+            )
+
+            active_user = user
+            response = self.client.put(
+                f"/api/projects/{project['id']}/completion",
+                json={"completed": True}, headers={"X-CSRF-Token": "csrf"},
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.get_json(), {"completed": True, "updated": 1, "total": 1})
+            self.assertTrue(self.client.get(f"/api/projects/{project['id']}/images").get_json()[0]["completed"])
 
 
 if __name__ == "__main__":

@@ -137,7 +137,6 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
   const [videoMetadata, setVideoMetadata] = useState(null)
   const [importingBboxes, setImportingBboxes] = useState(false)
   const [aisRecords, setAisRecords] = useState([])
-  const [selectedMmsi, setSelectedMmsi] = useState('')
   const [copiedMmsi, setCopiedMmsi] = useState('')
   const [aisSourceName, setAisSourceName] = useState('')
   const [showReidInfo, setShowReidInfo] = useState(true)
@@ -147,6 +146,7 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
   const [batchGidLabelId, setBatchGidLabelId] = useState(project.labels.find((label) => !label.system)?.id || '')
   const [applyingGid, setApplyingGid] = useState(false)
   const [batchGidResult, setBatchGidResult] = useState('')
+  const [updatingAllCompletion, setUpdatingAllCompletion] = useState(false)
   
   // 👇 新增：上傳狀態與進度
   const [uploading, setUploading] = useState(false)
@@ -169,6 +169,7 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
   const annotationClipboardRef = useRef(null)
   const clipboardStatusTimerRef = useRef(null)
   const pendingPasteImageIdRef = useRef(null)
+  const allImagesCompleted = images.length > 0 && images.every((item) => item.completed)
   const filteredImages = images.filter((item) => progressFilter === 'all' || (progressFilter === 'completed' ? item.completed : !item.completed))
   const currentImage = filteredImages[index] || filteredImages[0]
   const nextImageToPreload = filteredImages[index + 1]
@@ -217,7 +218,7 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
     setAnnotationReady(false)
     setVideoMetadata(null)
     setDocument({ annotations: [], classifications: [], revision: 0 })
-    setPast([]); setFuture([]); setSelectedId(null); setCurrentFrame(0); setAisRecords([]); setSelectedMmsi(''); setAisSourceName('')
+    setPast([]); setFuture([]); setSelectedId(null); setCurrentFrame(0); setAisRecords([]); setCopiedMmsi(''); setAisSourceName('')
     fetchAnnotation(currentImage.id).then((data) => {
       if (cancelled) return
       annotationCacheRef.current.delete(currentImage.id)
@@ -225,8 +226,7 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
       const annotations = hydrateSegmentationTopology(sourceAnnotations)
       const materialized = { ...data, annotations }
       const restoredAisRecords = Array.isArray(data.editor_state?.mmsi_records) ? data.editor_state.mmsi_records : []
-      const restoredMmsiValues = [...new Set(restoredAisRecords.map((item) => item.mmsi))].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
-      setDocument(materialized); setPast([]); setFuture([]); setSelectedId(null); setCurrentFrame(0); setAisRecords(restoredAisRecords); setSelectedMmsi(restoredMmsiValues[0] || ''); setAisSourceName(data.editor_state?.mmsi_source_name || ''); setSaveState('已儲存'); setAnnotationReady(true)
+      setDocument(materialized); setPast([]); setFuture([]); setSelectedId(null); setCurrentFrame(0); setAisRecords(restoredAisRecords); setCopiedMmsi(''); setAisSourceName(data.editor_state?.mmsi_source_name || ''); setSaveState('已儲存'); setAnnotationReady(true)
       if (JSON.stringify(sourceAnnotations) !== JSON.stringify(data.annotations)) {
         api.saveAnnotation(project.id, currentImage.id, materialized).then((saved) => {
           if (!cancelled) setDocument((current) => ({ ...current, revision: saved.revision, updatedAt: saved.updatedAt }))
@@ -351,13 +351,13 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
   }, [annotationReady, currentImage?.id, pasteSelectedAnnotation])
 
   const navigate = useCallback((delta) => {
-    if (!filteredImages.length) return
+    if (!filteredImages.length || updatingAllCompletion) return
     if (saveState === '尚未儲存') save()
     setIndex((value) => Math.max(0, Math.min(filteredImages.length - 1, value + delta)))
-  }, [filteredImages.length, save, saveState])
+  }, [filteredImages.length, save, saveState, updatingAllCompletion])
 
   const finishAndNext = useCallback(async () => {
-    if (!currentImage || finishInProgress.current) return
+    if (!currentImage || finishInProgress.current || updatingAllCompletion) return
     finishInProgress.current = true
     try {
       const completedDocument = { ...document, completed: true }
@@ -374,7 +374,7 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
     } finally {
       finishInProgress.current = false
     }
-  }, [currentImage, document, filteredImages, progressFilter, save])
+  }, [currentImage, document, filteredImages, progressFilter, save, updatingAllCompletion])
 
   useEffect(() => {
     const isTextEditor = (target) => ['INPUT', 'TEXTAREA'].includes(target?.tagName) || target?.isContentEditable
@@ -713,9 +713,9 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
   const hasMixedCameraIds = cameraIdValues.length > 1
   const batchGidLabel = project.labels.find((label) => !label.system && label.id === batchGidLabelId)
   const batchGidMmsiAttribute = mmsiAttributeForLabel(batchGidLabel)
-  const mmsiOptions = [...new Set(aisRecords.map((item) => item.mmsi))].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
-  const aisOverlayPoints = reidEditOnly && selectedMmsi
-    ? aisRecords.filter((item) => item.mmsi === selectedMmsi).map((item) => currentImage?.mediaType === 'video' && videoMetadata
+  const mmsiOptions = [...new Set(aisRecords.map((item) => String(item.mmsi ?? '').trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
+  const aisOverlayPoints = reidEditOnly
+    ? aisRecords.map((item) => currentImage?.mediaType === 'video' && videoMetadata
       ? { ...item, x: item.x * currentImage.width / videoMetadata.width, y: item.y * currentImage.height / videoMetadata.height }
       : item)
     : []
@@ -897,11 +897,32 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
     setImages((items) => items.map((item) => item.id === currentImage.id ? { ...item, completed: next.completed } : item))
   }
 
-  const copySelectedMmsi = async () => {
-    if (!selectedMmsi) return
+  const toggleAllCompleted = async () => {
+    if (!images.length || updatingAllCompletion) return
+    const completed = !allImagesCompleted
+    setUpdatingAllCompletion(true)
+    setError('')
     try {
-      await copyText(selectedMmsi)
-      setCopiedMmsi(selectedMmsi)
+      if (currentImage && !(await save())) return
+      await api.updateAllCompletion(project.id, completed)
+      annotationCacheRef.current.clear()
+      const refreshed = currentImage ? await fetchAnnotation(currentImage.id) : null
+      annotationCacheRef.current.clear()
+      setImages((items) => items.map((item) => ({ ...item, completed })))
+      if (refreshed) setDocument((current) => ({ ...current, completed, revision: refreshed.revision, updatedAt: refreshed.updatedAt }))
+      setSaveState('已儲存')
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setUpdatingAllCompletion(false)
+    }
+  }
+
+  const copySelectedMmsi = async (mmsi) => {
+    if (!mmsi) return
+    try {
+      await copyText(mmsi)
+      setCopiedMmsi(mmsi)
       window.clearTimeout(mmsiCopyTimerRef.current)
       mmsiCopyTimerRef.current = window.setTimeout(() => setCopiedMmsi(''), 1600)
     } catch (err) { setError(err.message) }
@@ -931,9 +952,10 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
       <header className="workspace-header">
         <div className="workspace-brand"><button className="icon-button" onClick={(event) => { event.stopPropagation(); onExit() }}><ArrowLeft size={19} /></button><div><strong>{project.name}</strong><span>{currentImage ? `${index + 1} / ${images.length} · ${mediaDisplayPath(currentImage)}` : '尚未載入圖片'}</span></div></div>
         <div className="workspace-actions">
-          <select className="progress-filter" value={progressFilter} onChange={(event) => { setProgressFilter(event.target.value); setIndex(0) }}><option value="all">全部資料</option><option value="pending">未完成</option><option value="completed">已完成</option></select>
-          {filteredImages.length > 0 && <label className="image-jump"><span>跳轉資料</span><select value={Math.max(0, filteredImages.findIndex((item) => item.id === currentImage?.id))} onChange={(event) => setIndex(Number(event.target.value))}>{filteredImages.map((item, imageIndex) => <option key={item.id} value={imageIndex}>{imageIndex + 1}. {mediaDisplayPath(item)}</option>)}</select></label>}
-          <button className="secondary-button compact" onClick={toggleCompleted} disabled={!currentImage}>{document.completed ? '取消完成' : '標記完成'}</button>
+          <select className="progress-filter" value={progressFilter} disabled={updatingAllCompletion} onChange={(event) => { setProgressFilter(event.target.value); setIndex(0) }}><option value="all">全部資料</option><option value="pending">未完成</option><option value="completed">已完成</option></select>
+          {filteredImages.length > 0 && <label className="image-jump"><span>跳轉資料</span><select value={Math.max(0, filteredImages.findIndex((item) => item.id === currentImage?.id))} disabled={updatingAllCompletion} onChange={(event) => setIndex(Number(event.target.value))}>{filteredImages.map((item, imageIndex) => <option key={item.id} value={imageIndex}>{imageIndex + 1}. {mediaDisplayPath(item)}</option>)}</select></label>}
+          <button className="secondary-button compact" onClick={toggleCompleted} disabled={!currentImage || updatingAllCompletion}>{document.completed ? '取消完成' : '標記完成'}</button>
+          <button className="secondary-button compact" onClick={toggleAllCompleted} disabled={!images.length || updatingAllCompletion}>{updatingAllCompletion ? '更新中…' : allImagesCompleted ? '全部取消完成' : '全部完成'}</button>
           {isAdmin && <button className="secondary-button compact" onClick={() => fileInputRef.current?.click()} disabled={uploading}><ImagePlus size={16} />新增檔案</button>}
           {isAdmin && <button className="secondary-button compact" onClick={() => folderInputRef.current?.click()} disabled={uploading}><FolderOpen size={16} />選擇資料夾</button>}
           {isAdmin && editingProject && tool === 'reid' && currentImage?.mediaType === 'video' && <button className="secondary-button compact" onClick={() => bboxInputRef.current?.click()} disabled={importingBboxes || !videoMetadata}>{importingBboxes ? '開啟中…' : '開啟 bbox JSONL'}</button>}
@@ -958,12 +980,12 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
         <section className="canvas-column">
           <div className="mode-banner on">{reidEditOnly ? `ReID 純修改模式 · bbox 已鎖定 · 可修改屬性與 ID${document.editor_state?.bbox_source_name ? ` · ${document.editor_state.bbox_source_name}` : ''}` : tool === 'classification' ? '圖片分類模式 · 於右側選擇圖片層級 label · 右鍵拖曳視角' : '整合模式 · 左鍵標註／編輯 · 右鍵拖曳視角'}</div>
           {!currentImage ? (progressFilter === 'all' ? <div className="upload-empty"><ImagePlus size={46} /><strong>{isAdmin ? '載入圖片／影片資料集' : '專案目前沒有可標註資料'}</strong><span>{isAdmin ? (editingProject ? '可直接選擇最外層日期資料夾；工具會遞迴載入圖片並自動套用各自的「資料夾名_bbox.jsonl」' : '可選擇多個檔案或整個資料夾；檔案會複製至專案資料夾') : '請聯絡管理員加入圖片或影片'}</span>{isAdmin && <div className="upload-actions"><button className="primary-button" onClick={() => fileInputRef.current?.click()} disabled={uploading}><ImagePlus size={16} />選擇檔案</button><button className="secondary-button" onClick={() => folderInputRef.current?.click()} disabled={uploading}><FolderOpen size={16} />選擇資料夾</button></div>}</div> : <div className="upload-empty"><strong>此分群沒有檔案</strong><span>{progressFilter === 'completed' ? '目前沒有已完成的資料' : '目前沒有未完成的資料'}</span></div>) : <AnnotationCanvas key={currentImage.id} image={currentImage} imageUrl={api.imageUrl(project.id, currentImage.id)} annotations={visibleAnnotations} labels={project.labels} activeLabelId={tool === 'ocr' ? 'ocr-text' : activeLabelId} tool={tool} selectedId={selectedId} onSelect={setSelectedId} onCommit={reidEditOnly ? () => {} : handleCanvasCommit} onUpdate={reidEditOnly ? () => {} : handleCanvasUpdate} onDraftActiveChange={handleDraftActiveChange} resetToken={resetToken} currentFrame={currentFrame} onFrameChange={(frame) => { setCurrentFrame(frame); setSelectedId(null) }} readOnlyGeometry={reidEditOnly} frameTimeline={frameTimeline} onVideoMetadata={setVideoMetadata} overlayPoints={aisOverlayPoints} showReidInfo={showReidInfo} />}
-          <footer className="image-nav"><button onClick={() => navigate(-1)} disabled={index === 0}><ChevronLeft size={18} />上一張</button><div className="progress-track"><span style={{ width: images.length ? `${((index + 1) / images.length) * 100}%` : '0%' }} /></div><button onClick={() => navigate(1)} disabled={index >= images.length - 1}>下一張<ChevronRight size={18} /></button></footer>
+          <footer className="image-nav"><button onClick={() => navigate(-1)} disabled={index === 0 || updatingAllCompletion}><ChevronLeft size={18} />上一張</button><div className="progress-track"><span style={{ width: images.length ? `${((index + 1) / images.length) * 100}%` : '0%' }} /></div><button onClick={() => navigate(1)} disabled={index >= images.length - 1 || updatingAllCompletion}>下一張<ChevronRight size={18} /></button></footer>
         </section>
         <aside className="inspector-panel">
           {tool === 'reid' && currentImage && <section><span className="panel-label">{currentImage.mediaType === 'video' ? '本段影片' : '本張圖片'} CAMERA ID</span><div className="camera-id-row"><input value={sharedCameraId} onChange={(event) => setSharedCameraId(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') applySharedCameraId() }} placeholder={hasMixedCameraIds ? '目前有多個值' : '輸入 Camera ID'} /><button type="button" onClick={applySharedCameraId} disabled={!sharedCameraId.trim() || !reidAnnotations.length}>套用全部</button></div><small className="field-hint">套用到此{currentImage.mediaType === 'video' ? '影片' : '圖片'}的 {reidAnnotations.length} 個 bbox，可使用復原還原。</small></section>}
           {tool === 'reid' && <section><span className="panel-label">GID 批次套用</span><div className="gid-bulk-form"><label className="field small"><span>GID</span><input value={batchGid} onChange={(event) => { setBatchGid(event.target.value); setBatchGidResult('') }} placeholder="輸入要統一的 GID" /></label><label className="field small"><span>類別</span><select value={batchGidLabelId} onChange={(event) => { setBatchGidLabelId(event.target.value); setBatchGidResult('') }}>{project.labels.filter((label) => !label.system).map((label) => <option key={label.id} value={label.id}>{label.name}</option>)}</select></label><label className="field small"><span>MMSI</span><input value={batchGidMmsi} onChange={(event) => { setBatchGidMmsi(event.target.value); setBatchGidResult('') }} placeholder="留空會清除 MMSI" /></label><button type="button" className="secondary-button compact gid-apply-button" onClick={applyGidDetails} disabled={applyingGid || !batchGid.trim() || !batchGidLabel || (Boolean(batchGidMmsi.trim()) && !batchGidMmsiAttribute)}>{applyingGid ? '套用中…' : '套用到整個專案'}</button></div>{batchGidMmsi.trim() && batchGidLabel && !batchGidMmsiAttribute && <small className="field-hint warning">類別「{batchGidLabel.name}」沒有手動建立的 mmsi 屬性，無法填入 MMSI。</small>}<small className="field-hint">會更新整個專案內相同 GID 的 bbox 類別；MMSI 留空時會清除原值。</small>{batchGidResult && <div className="batch-result">{batchGidResult}</div>}</section>}
-          {reidEditOnly && aisRecords.length > 0 && <section><span className="panel-label">MMSI 座標{aisSourceName ? ` · ${aisSourceName}` : ''}</span><label className="field small"><span>選擇 MMSI</span><div className="mmsi-copy-row"><select value={selectedMmsi} onChange={(event) => { setSelectedMmsi(event.target.value); setCopiedMmsi('') }}>{mmsiOptions.map((mmsi) => <option key={mmsi} value={mmsi}>{mmsi}</option>)}</select><button type="button" className="secondary-button compact" onClick={copySelectedMmsi} disabled={!selectedMmsi}>{copiedMmsi === selectedMmsi ? <Check size={14} /> : <Copy size={14} />}{copiedMmsi === selectedMmsi ? '已複製' : '複製'}</button></div></label></section>}
+          {reidEditOnly && aisRecords.length > 0 && <section><span className="panel-label">MMSI 座標{aisSourceName ? ` · ${aisSourceName}` : ''}</span><div className="mmsi-list">{mmsiOptions.map((mmsi) => <div className="mmsi-copy-row" key={mmsi}><span>{mmsi}</span><button type="button" className="secondary-button compact" onClick={() => copySelectedMmsi(mmsi)}>{copiedMmsi === mmsi ? <Check size={14} /> : <Copy size={14} />}{copiedMmsi === mmsi ? '已複製' : '複製'}</button></div>)}</div><small className="field-hint">畫面會同時顯示這張圖片的全部 MMSI 座標。</small></section>}
           {tool !== 'ocr' && <section><span className="panel-label">目前 LABEL</span><div className="label-picker">{project.labels.filter((label) => !label.system).map((label) => <div className="label-picker-row" key={label.id}>{editingLabelId === label.id ? <><input autoFocus value={editingLabelName} onChange={(event) => setEditingLabelName(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') renameLabel(); if (event.key === 'Escape') setEditingLabelId(null) }} /><button className="label-row-action confirm" title="儲存名稱" onClick={renameLabel} disabled={!editingLabelName.trim() || renamingLabel}><Check size={14} /></button><button className="label-row-action" title="取消" onClick={() => setEditingLabelId(null)}><X size={14} /></button></> : <><button className={`label-choice ${activeLabelId === label.id ? 'active' : ''}`} onClick={() => setActiveLabelId(label.id)}><i style={{ background: label.color }} />{label.name}</button>{isAdmin && <button className="label-row-action" title="修改名稱" onClick={() => { setEditingLabelId(label.id); setEditingLabelName(label.name) }}><Pencil size={14} /></button>}{isAdmin && <button className="label-row-action danger" title="刪除未使用的 label" onClick={() => deleteLabel(label)} disabled={Boolean(deletingDefinition)}><Trash2 size={14} /></button>}</>}</div>)}</div>{isAdmin && <div className="label-add-row"><input value={newLabelName} onChange={(event) => setNewLabelName(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') addLabel() }} placeholder="輸入 label 名稱" /><button onClick={addLabel} disabled={!newLabelName.trim() || addingLabel}>{addingLabel ? '新增中…' : '新增'}</button></div>}</section>}
           {isAdmin && tool !== 'ocr' && tool !== 'classification' && activeLabel && <section><span className="panel-label">新增屬性 · {activeLabel.name}</span>{(activeLabel.attributes || []).length > 0 && <div className="attribute-summary">{activeLabel.attributes.map((attribute) => <span key={attribute.id}>{attribute.name}<small>{attribute.type === 'number' ? 'Number' : 'Text'}</small><button title="刪除未使用的屬性" onClick={() => deleteAttribute(attribute)} disabled={Boolean(deletingDefinition)}><X size={12} /></button></span>)}</div>}<div className="attribute-add-row"><input value={newAttributeName} onChange={(event) => setNewAttributeName(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') addAttribute() }} placeholder="屬性名稱" /><select value={newAttributeType} onChange={(event) => setNewAttributeType(event.target.value)}><option value="text">Text</option><option value="number">Number</option></select><button onClick={addAttribute} disabled={!newAttributeName.trim() || addingAttribute}>{addingAttribute ? '新增中…' : '新增'}</button></div></section>}
           {project.primaryMode === 'classification' && <section><span className="panel-label">圖片分類</span><div className="classification-list">{classificationLabels.map((label) => <label key={label.id}><input type={project.classificationMode === 'single' ? 'radio' : 'checkbox'} checked={document.classifications.some((item) => item.label_id === label.id)} onChange={() => toggleClassification(label.id)} /><i style={{ background: label.color }} />{label.name}</label>)}</div></section>}

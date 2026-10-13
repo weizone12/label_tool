@@ -16,7 +16,7 @@ from flask import Flask, abort, g, jsonify, request, send_file
 from flask_cors import CORS
 from PIL import Image
 from auth_integration import register_auth_integration
-from project_access import assigned_project_ids, register_project_access, remove_project_assignments
+from project_access import assigned_project_ids, assigned_user_ids_by_project, register_project_access, remove_project_assignments
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -637,9 +637,14 @@ def list_projects():
             project["pendingCount"] = max(0, image_count - completed_count)
             project["completed"] = image_count > 0 and completed_count == image_count
             projects.append(project)
-    if not app.config.get("AUTH_DISABLED_FOR_TESTS") and not g.current_user.get("is_admin"):
+    is_admin = app.config.get("AUTH_DISABLED_FOR_TESTS") is True or bool(getattr(g, "current_user", {}).get("is_admin"))
+    if not is_admin:
         allowed = assigned_project_ids(g.current_user["id"])
         projects = [project for project in projects if project.get("id") in allowed]
+    else:
+        assignments = assigned_user_ids_by_project()
+        for project in projects:
+            project["assignedUserIds"] = assignments.get(project.get("id"), [])
     projects.sort(key=lambda item: item.get("updatedAt", ""), reverse=True)
     return jsonify(projects)
 
@@ -834,6 +839,35 @@ def update_project(project_id: str):
 def list_images(project_id: str):
     directory = project_dir(project_id)
     return jsonify(list_image_records(directory))
+
+
+@app.put("/api/projects/<project_id>/completion")
+def update_project_completion(project_id: str):
+    directory = project_dir(project_id)
+    body = request.get_json(silent=True) or {}
+    completed = body.get("completed")
+    if not isinstance(completed, bool):
+        return jsonify({"error": "completed 必須是布林值"}), 400
+
+    records = list_image_records(directory)
+    updated = 0
+    timestamp = utc_now()
+    for record in records:
+        path = directory / "annotations" / f"{record['id']}.json"
+        stored = read_json(path, {}) or {}
+        if bool(stored.get("completed", False)) == completed:
+            continue
+        try:
+            revision = int(stored.get("revision", 0))
+        except (TypeError, ValueError):
+            revision = 0
+        stored["schema_version"] = "1.0"
+        stored["completed"] = completed
+        stored["revision"] = revision + 1
+        stored["updatedAt"] = timestamp
+        write_json_atomic(path, stored)
+        updated += 1
+    return jsonify({"completed": completed, "updated": updated, "total": len(records)})
 
 
 @app.post("/api/projects/<project_id>/images/select-files")
