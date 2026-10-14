@@ -383,6 +383,12 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
   useEffect(() => {
     const isTextEditor = (target) => ['INPUT', 'TEXTAREA'].includes(target?.tagName) || target?.isContentEditable
     const handler = (event) => {
+      if (reidEditOnly && event.code === 'Space') {
+        event.preventDefault()
+        event.stopImmediatePropagation()
+        if (!event.repeat) navigate(1)
+        return
+      }
       const modifier = event.ctrlKey || event.metaKey
       const shortcut = event.code === 'KeyC' ? 'c' : event.code === 'KeyV' ? 'v' : event.key.toLowerCase()
       if (draftActiveRef.current && modifier && ['c', 'v'].includes(shortcut)) { event.preventDefault(); return }
@@ -427,7 +433,7 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
       window.removeEventListener('copy', copyHandler, true)
       window.removeEventListener('paste', pasteHandler, true)
     }
-  }, [copySelectedAnnotation, deleteSelected, finishAndNext, navigate, pasteSelectedAnnotation, redo, undo])
+  }, [copySelectedAnnotation, deleteSelected, finishAndNext, navigate, pasteSelectedAnnotation, redo, reidEditOnly, undo])
 
   const handleDraftActiveChange = useCallback((active) => { draftActiveRef.current = active }, [])
 
@@ -1046,7 +1052,7 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
             const label = project.labels.find((item) => item.id === annotation.labelId)
             return <div className="annotation-list-item" key={annotation.id}><button className={selectedId === annotation.id ? 'active' : ''} onClick={() => setSelectedId(annotation.id)}><i style={{ background: label?.color }} /><span>{label?.name || '未命名'}<small>{TOOL_NAMES[annotation.type]} #{itemIndex + 1}</small></span>{annotation.hidden ? <EyeOff size={14} /> : <Eye size={14} />}</button>{selectedId === annotation.id && selectionEditor}</div>
           })}</div></section>}
-          <section className="shortcut-card"><span className="panel-label">快捷鍵</span><div><kbd>F</kbd>儲存、標記完成並前往下一張</div><div><kbd>A</kbd><kbd>D</kbd>切換圖片</div><div><kbd>R</kbd>重設視角</div><div><kbd>Del</kbd>刪除選取</div>{reidEditOnly && <div><kbd>Tab</kbd>依 LID／GID 循環選框</div>}{COPYABLE_ANNOTATION_TYPES.has(tool) && <div><kbd>Ctrl C/V</kbd>複製／貼上選取標註</div>}<div><kbd>Ctrl Z/Y</kbd>復原／重做</div><div><kbd>Alt 點擊</kbd>循環選取</div><div><kbd>Shift 點擊</kbd>在重疊處強制標註</div>{clipboardStatus && <div className="clipboard-message">{clipboardStatus}</div>}</section>
+          <section className="shortcut-card"><span className="panel-label">快捷鍵</span><div><kbd>F</kbd>儲存、標記完成並前往下一張</div>{reidEditOnly && <div><kbd>Space</kbd>前往下一張</div>}<div><kbd>A</kbd><kbd>D</kbd>切換圖片</div><div><kbd>R</kbd>重設視角</div><div><kbd>Del</kbd>刪除選取</div>{reidEditOnly && <div><kbd>Tab</kbd>依 LID／GID 循環選框</div>}{COPYABLE_ANNOTATION_TYPES.has(tool) && <div><kbd>Ctrl C/V</kbd>複製／貼上選取標註</div>}<div><kbd>Ctrl Z/Y</kbd>復原／重做</div><div><kbd>Alt 點擊</kbd>循環選取</div><div><kbd>Shift 點擊</kbd>在重疊處強制標註</div>{clipboardStatus && <div className="clipboard-message">{clipboardStatus}</div>}</section>
         </aside>
       </div>
     </main>
