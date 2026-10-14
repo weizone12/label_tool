@@ -6,6 +6,7 @@ import { createId } from '../uuid'
 import { hydrateSegmentationTopology, insertSharedVertices, isSegmentation, updateSharedVertices } from '../segmentationTopology'
 import { datasetFrameTime, discoverAisFiles, discoverImageBboxSets, fileDirectory, matchBboxRowsToRecords, mediaFilesFromSelection, parseAisRows, parseImageBboxRows, selectionPath } from '../reidBboxImport'
 import { fitBoxWithinBounds } from '../reidGeometry'
+import { assignReidLidsByGid } from '../reidLidAssignment'
 
 const TOOL_NAMES = {
   rectangle: '矩形', polygon: '多邊形', ocr: 'OCR 四邊形', rotated_rectangle: '三點旋轉矩形',
@@ -455,11 +456,25 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
     const selectedAnnotation = document.annotations.find((item) => item.id === selectedId && item.type === 'reid')
     if (!selectedAnnotation) return
     window.requestAnimationFrame(() => {
-      const input = String(selectedAnnotation.track_id ?? '').trim() ? reidGidInputRef.current : reidLidInputRef.current
-      input?.focus()
-      input?.select()
+      reidGidInputRef.current?.focus()
+      reidGidInputRef.current?.select()
     })
   }, [reidEditOnly, selectedId])
+
+  const assignCurrentReidLids = () => {
+    const imageIsVideo = currentImage?.mediaType === 'video'
+    const preview = assignReidLidsByGid(document.annotations, currentFrame, imageIsVideo)
+    if (preview === document.annotations) return
+    commit((current) => {
+      const annotations = assignReidLidsByGid(current.annotations, currentFrame, imageIsVideo)
+      return { ...current, annotations: regenerateReidAnnotations(annotations, currentImage?.width, currentImage?.height) }
+    })
+  }
+
+  const selectAnnotation = (id) => {
+    if (reidEditOnly && id !== selectedId) assignCurrentReidLids()
+    setSelectedId(id)
+  }
 
   const importImageBboxSets = async (bboxSets, aisFiles, uploadedRecords) => {
     if (!bboxSets.length) return
@@ -739,11 +754,12 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
       const nextIndex = currentIndex < 0
         ? (direction > 0 ? 0 : reidTabOrder.length - 1)
         : (currentIndex + direction + reidTabOrder.length) % reidTabOrder.length
+      assignCurrentReidLids()
       setSelectedId(reidTabOrder[nextIndex])
     }
     window.addEventListener('keydown', handleTabSelection, true)
     return () => window.removeEventListener('keydown', handleTabSelection, true)
-  }, [reidEditOnly, reidTabOrder, selectedId])
+  }, [reidEditOnly, reidTabOrder, selectedId, assignCurrentReidLids])
 
   useEffect(() => {
     const values = [...new Set(document.annotations.filter((item) => item.type === 'reid').map((item) => String(item.camera_id ?? '').trim()))]
@@ -983,7 +999,7 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
 
   const selectionEditor = selected && <section ref={selectedEditorRef} className="selection-editor"><div className="selection-title"><span className="panel-label">選取項目</span>{!reidEditOnly && <div><button className="icon-button" title={selected.hidden ? '顯示' : '隱藏'} onClick={() => updateSelected({ hidden: !selected.hidden })}>{selected.hidden ? <EyeOff size={15} /> : <Eye size={15} />}</button><button className="icon-button" title={selected.locked ? '解鎖' : '鎖定'} onClick={() => updateSelected({ locked: !selected.locked })}>{selected.locked ? <Lock size={15} /> : <Unlock size={15} />}</button><button className="icon-button danger" onClick={deleteSelected}><Trash2 size={15} /></button></div>}</div>
     {selected.type !== 'ocr' && <label className="field small"><span>Label</span><select value={selected.labelId} onChange={(e) => updateSelected({ labelId: e.target.value })}>{project.labels.filter((label) => !label.system).map((label) => <option key={label.id} value={label.id}>{label.name}</option>)}</select></label>}
-    {selected.type === 'reid' && <><label className="field small"><span>Identity ID（GID／跨圖片身分）</span><input ref={reidGidInputRef} value={selected.identity_id || ''} onChange={(e) => updateSelected({ identity_id: e.target.value })} placeholder="例如 person_001" /></label><label className="field small"><span>Track ID（LID／同影片軌跡）</span><input ref={reidLidInputRef} value={selected.track_id || ''} onChange={(e) => updateSelected({ track_id: e.target.value })} /></label><label className="field small"><span>Camera ID</span><input value={selected.camera_id || ''} onChange={(e) => updateSelected({ camera_id: e.target.value })} /></label><label className="field small"><span>Video ID</span><input value={selected.video_id || ''} onChange={(e) => updateSelected({ video_id: e.target.value })} /></label>{currentImage?.mediaType === 'video' && <label className="field small"><span>Frame ID</span><input value={selected.frame_id ?? ''} readOnly /></label>}{currentImage?.mediaType === 'video' && !reidEditOnly && <label className="classification-toggle"><input type="checkbox" checked={Boolean(selected.keyframe)} onChange={(e) => updateSelected({ keyframe: e.target.checked })} /><span><strong>關鍵影格</strong><small>此框為追蹤軌跡的明確標註點</small></span></label>}</>}
+    {selected.type === 'reid' && <><label className="field small"><span>Identity ID（GID／跨圖片身分）</span><input ref={reidGidInputRef} value={selected.identity_id || ''} onChange={(e) => updateSelected({ identity_id: e.target.value })} onBlur={assignCurrentReidLids} onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur() }} placeholder="例如 person_001" /></label><label className="field small"><span>Track ID（LID／同影片軌跡）</span><input ref={reidLidInputRef} value={selected.track_id || ''} onChange={(e) => updateSelected({ track_id: e.target.value, auto_lid: false })} /></label><label className="field small"><span>Camera ID</span><input value={selected.camera_id || ''} onChange={(e) => updateSelected({ camera_id: e.target.value })} /></label><label className="field small"><span>Video ID</span><input value={selected.video_id || ''} onChange={(e) => updateSelected({ video_id: e.target.value })} /></label>{currentImage?.mediaType === 'video' && <label className="field small"><span>Frame ID</span><input value={selected.frame_id ?? ''} readOnly /></label>}{currentImage?.mediaType === 'video' && !reidEditOnly && <label className="classification-toggle"><input type="checkbox" checked={Boolean(selected.keyframe)} onChange={(e) => updateSelected({ keyframe: e.target.checked })} /><span><strong>關鍵影格</strong><small>此框為追蹤軌跡的明確標註點</small></span></label>}</>}
     {selectedLabel?.attributes.map((attribute) => <label className="field small" key={attribute.id}><span>{attribute.name}</span><input ref={selected.type === 'ocr' && attribute.id === 'transcription' ? ocrInputRef : null} type={attribute.type === 'number' ? 'number' : 'text'} value={selected.attributes?.[attribute.id] ?? ''} onChange={(e) => updateSelected({ attributes: { ...selected.attributes, [attribute.id]: attribute.type === 'number' ? (e.target.value === '' ? null : Number(e.target.value)) : e.target.value } })} placeholder={selected.type === 'ocr' ? '輸入框內文字' : ''} /></label>)}
   </section>
 
@@ -1032,7 +1048,7 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
         </aside>
         <section className="canvas-column">
           <div className="mode-banner on">{reidEditOnly ? `ReID 純修改模式 · bbox 已鎖定 · 可修改屬性與 ID${document.editor_state?.bbox_source_name ? ` · ${document.editor_state.bbox_source_name}` : ''}` : tool === 'classification' ? '圖片分類模式 · 於右側選擇圖片層級 label · 右鍵拖曳視角' : '整合模式 · 左鍵標註／編輯 · 右鍵拖曳視角'}</div>
-          {!currentImage ? (progressFilter === 'all' ? <div className="upload-empty"><ImagePlus size={46} /><strong>{isAdmin ? '載入圖片／影片資料集' : '專案目前沒有可標註資料'}</strong><span>{isAdmin ? (editingProject ? '可直接選擇最外層日期資料夾；工具會遞迴載入圖片並自動套用各自的「資料夾名_bbox.jsonl」' : '可選擇多個檔案或整個資料夾；檔案會複製至專案資料夾') : '請聯絡管理員加入圖片或影片'}</span>{isAdmin && <div className="upload-actions"><button className="primary-button" onClick={() => fileInputRef.current?.click()} disabled={uploading}><ImagePlus size={16} />選擇檔案</button><button className="secondary-button" onClick={() => folderInputRef.current?.click()} disabled={uploading}><FolderOpen size={16} />選擇資料夾</button></div>}</div> : <div className="upload-empty"><strong>此分群沒有檔案</strong><span>{progressFilter === 'completed' ? '目前沒有已完成的資料' : '目前沒有未完成的資料'}</span></div>) : <AnnotationCanvas key={currentImage.id} image={currentImage} imageUrl={api.imageUrl(project.id, currentImage.id)} annotations={visibleAnnotations} labels={project.labels} activeLabelId={tool === 'ocr' ? 'ocr-text' : activeLabelId} tool={tool} selectedId={selectedId} onSelect={setSelectedId} onCommit={reidEditOnly ? () => {} : handleCanvasCommit} onUpdate={reidEditOnly ? () => {} : handleCanvasUpdate} onDraftActiveChange={handleDraftActiveChange} resetToken={resetToken} currentFrame={currentFrame} onFrameChange={(frame) => { setCurrentFrame(frame); setSelectedId(null) }} readOnlyGeometry={reidEditOnly} frameTimeline={frameTimeline} onVideoMetadata={setVideoMetadata} overlayPoints={aisOverlayPoints} showReidInfo={showReidInfo} />}
+          {!currentImage ? (progressFilter === 'all' ? <div className="upload-empty"><ImagePlus size={46} /><strong>{isAdmin ? '載入圖片／影片資料集' : '專案目前沒有可標註資料'}</strong><span>{isAdmin ? (editingProject ? '可直接選擇最外層日期資料夾；工具會遞迴載入圖片並自動套用各自的「資料夾名_bbox.jsonl」' : '可選擇多個檔案或整個資料夾；檔案會複製至專案資料夾') : '請聯絡管理員加入圖片或影片'}</span>{isAdmin && <div className="upload-actions"><button className="primary-button" onClick={() => fileInputRef.current?.click()} disabled={uploading}><ImagePlus size={16} />選擇檔案</button><button className="secondary-button" onClick={() => folderInputRef.current?.click()} disabled={uploading}><FolderOpen size={16} />選擇資料夾</button></div>}</div> : <div className="upload-empty"><strong>此分群沒有檔案</strong><span>{progressFilter === 'completed' ? '目前沒有已完成的資料' : '目前沒有未完成的資料'}</span></div>) : <AnnotationCanvas key={currentImage.id} image={currentImage} imageUrl={api.imageUrl(project.id, currentImage.id)} annotations={visibleAnnotations} labels={project.labels} activeLabelId={tool === 'ocr' ? 'ocr-text' : activeLabelId} tool={tool} selectedId={selectedId} onSelect={selectAnnotation} onCommit={reidEditOnly ? () => {} : handleCanvasCommit} onUpdate={reidEditOnly ? () => {} : handleCanvasUpdate} onDraftActiveChange={handleDraftActiveChange} resetToken={resetToken} currentFrame={currentFrame} onFrameChange={(frame) => { setCurrentFrame(frame); setSelectedId(null) }} readOnlyGeometry={reidEditOnly} frameTimeline={frameTimeline} onVideoMetadata={setVideoMetadata} overlayPoints={aisOverlayPoints} showReidInfo={showReidInfo} />}
           <footer className="image-nav"><button onClick={() => navigate(-1)} disabled={index === 0 || updatingAllCompletion}><ChevronLeft size={18} />上一張</button><div className="progress-track"><span style={{ width: images.length ? `${((index + 1) / images.length) * 100}%` : '0%' }} /></div><button onClick={() => navigate(1)} disabled={index >= images.length - 1 || updatingAllCompletion}>下一張<ChevronRight size={18} /></button></footer>
         </section>
         <aside className="inspector-panel">
@@ -1044,7 +1060,7 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
           {project.primaryMode === 'classification' && <section><span className="panel-label">圖片分類</span><div className="classification-list">{classificationLabels.map((label) => <label key={label.id}><input type={project.classificationMode === 'single' ? 'radio' : 'checkbox'} checked={document.classifications.some((item) => item.label_id === label.id)} onChange={() => toggleClassification(label.id)} /><i style={{ background: label.color }} />{label.name}</label>)}</div></section>}
           {project.primaryMode !== 'classification' && <section className="annotation-list-section"><span className="panel-label">目前畫面標註 · {visibleAnnotations.length}</span><div className="annotation-list">{visibleAnnotations.map((annotation, itemIndex) => {
             const label = project.labels.find((item) => item.id === annotation.labelId)
-            return <div className="annotation-list-item" key={annotation.id}><button className={selectedId === annotation.id ? 'active' : ''} onClick={() => setSelectedId(annotation.id)}><i style={{ background: label?.color }} /><span>{label?.name || '未命名'}<small>{TOOL_NAMES[annotation.type]} #{itemIndex + 1}</small></span>{annotation.hidden ? <EyeOff size={14} /> : <Eye size={14} />}</button>{selectedId === annotation.id && selectionEditor}</div>
+            return <div className="annotation-list-item" key={annotation.id}><button className={selectedId === annotation.id ? 'active' : ''} onClick={() => selectAnnotation(annotation.id)}><i style={{ background: label?.color }} /><span>{label?.name || '未命名'}<small>{TOOL_NAMES[annotation.type]} #{itemIndex + 1}</small></span>{annotation.hidden ? <EyeOff size={14} /> : <Eye size={14} />}</button>{selectedId === annotation.id && selectionEditor}</div>
           })}</div></section>}
           <section className="shortcut-card"><span className="panel-label">快捷鍵</span><div><kbd>F</kbd>儲存、標記完成並前往下一張</div><div><kbd>A</kbd><kbd>D</kbd>切換圖片</div><div><kbd>R</kbd>重設視角</div><div><kbd>Del</kbd>刪除選取</div>{reidEditOnly && <div><kbd>Tab</kbd>依 LID／GID 循環選框</div>}{COPYABLE_ANNOTATION_TYPES.has(tool) && <div><kbd>Ctrl C/V</kbd>複製／貼上選取標註</div>}<div><kbd>Ctrl Z/Y</kbd>復原／重做</div><div><kbd>Alt 點擊</kbd>循環選取</div><div><kbd>Shift 點擊</kbd>在重疊處強制標註</div>{clipboardStatus && <div className="clipboard-message">{clipboardStatus}</div>}</section>
         </aside>
