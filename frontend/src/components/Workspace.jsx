@@ -15,6 +15,7 @@ const LABEL_COLORS = ['#fb7185', '#f59e0b', '#84cc16', '#22c55e', '#06b6d4', '#3
 const COPYABLE_ANNOTATION_TYPES = new Set(['rectangle', 'polygon', 'semantic_segmentation', 'instance_segmentation', 'reid', 'ocr', 'rotated_rectangle'])
 const ANNOTATION_CLIPBOARD_TYPE = 'application/x-miko-annotation'
 const cloneAnnotation = (annotation) => JSON.parse(JSON.stringify(annotation))
+const isSpaceKey = (event) => event.code === 'Space' || event.key === ' ' || event.key === 'Spacebar' || event.keyCode === 32
 
 const classLabelId = (name, index) => name.trim().toLocaleLowerCase().replace(/[^\p{L}\p{N}_-]+/gu, '-').replace(/^[-_]+|[-_]+$/g, '') || `class-${index + 1}`
 const mmsiAttributeForLabel = (label) => label?.attributes?.find((attribute) => String(attribute.name || attribute.id || '').trim().toLocaleLowerCase() === 'mmsi')
@@ -383,7 +384,7 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
   useEffect(() => {
     const isTextEditor = (target) => ['INPUT', 'TEXTAREA'].includes(target?.tagName) || target?.isContentEditable
     const handler = (event) => {
-      if (reidEditOnly && event.code === 'Space') {
+      if (reidEditOnly && isSpaceKey(event)) {
         event.preventDefault()
         event.stopImmediatePropagation()
         if (!event.repeat) navigate(1)
@@ -425,11 +426,19 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
       }
       if (pasteSelectedAnnotation()) event.preventDefault()
     }
+    const beforeInputHandler = (event) => {
+      if (!reidEditOnly || event.inputType !== 'insertText' || event.data !== ' ') return
+      event.preventDefault()
+      event.stopImmediatePropagation()
+      navigate(1)
+    }
     window.addEventListener('keydown', handler, true)
+    window.addEventListener('beforeinput', beforeInputHandler, true)
     window.addEventListener('copy', copyHandler, true)
     window.addEventListener('paste', pasteHandler, true)
     return () => {
       window.removeEventListener('keydown', handler, true)
+      window.removeEventListener('beforeinput', beforeInputHandler, true)
       window.removeEventListener('copy', copyHandler, true)
       window.removeEventListener('paste', pasteHandler, true)
     }
