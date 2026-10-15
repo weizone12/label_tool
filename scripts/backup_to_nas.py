@@ -144,11 +144,16 @@ def run_checked(
     *,
     attempts: int = 1,
     retry_codes: frozenset[int] = frozenset(),
-) -> None:
+    capture_stdout: bool = False,
+) -> subprocess.CompletedProcess[str]:
     for attempt in range(1, attempts + 1):
         try:
-            subprocess.run(command, check=True)
-            return
+            return subprocess.run(
+                command,
+                check=True,
+                stdout=subprocess.PIPE if capture_stdout else None,
+                text=capture_stdout,
+            )
         except FileNotFoundError as error:
             raise RuntimeError(f"缺少必要指令：{command[0]}") from error
         except subprocess.CalledProcessError as error:
@@ -158,6 +163,7 @@ def run_checked(
                 time.sleep(delay)
                 continue
             raise RuntimeError(f"{description}失敗（結束碼 {error.returncode}）") from error
+    raise RuntimeError(f"{description}失敗")
 
 
 def ensure_remote_directories(config: BackupConfig, directories: list[PurePosixPath]) -> None:
@@ -179,6 +185,8 @@ def directory_rsync_command(config: BackupConfig, source: Path, destination: Pur
         "-a",
         "--partial",
         "--protect-args",
+        "--itemize-changes",
+        "--out-format=CHANGE:%i",
         "--rsync-path=/usr/bin/rsync",
         "-e", rsync_remote_shell(config),
         "--",
@@ -187,13 +195,19 @@ def directory_rsync_command(config: BackupConfig, source: Path, destination: Pur
     ]
 
 
-def rsync_directory(config: BackupConfig, source: Path, destination: PurePosixPath) -> None:
-    run_checked(
+def rsync_output_has_changes(output: str | None) -> bool:
+    return any(line.startswith("CHANGE:") for line in (output or "").splitlines())
+
+
+def rsync_directory(config: BackupConfig, source: Path, destination: PurePosixPath) -> bool:
+    result = run_checked(
         directory_rsync_command(config, source, destination),
         f"備份專案 {source.name}",
         attempts=3,
         retry_codes=frozenset({10, 12, 30, 35}),
+        capture_stdout=True,
     )
+    return rsync_output_has_changes(result.stdout)
 
 
 def file_rsync_command(config: BackupConfig, source: Path, destination: PurePosixPath) -> list[str]:
@@ -204,6 +218,8 @@ def file_rsync_command(config: BackupConfig, source: Path, destination: PurePosi
         "--checksum",
         "--partial",
         "--protect-args",
+        "--itemize-changes",
+        "--out-format=CHANGE:%i",
         "--rsync-path=/usr/bin/rsync",
         "-e", rsync_remote_shell(config),
         "--",
@@ -212,13 +228,15 @@ def file_rsync_command(config: BackupConfig, source: Path, destination: PurePosi
     ]
 
 
-def rsync_file(config: BackupConfig, source: Path, destination: PurePosixPath) -> None:
-    run_checked(
+def rsync_file(config: BackupConfig, source: Path, destination: PurePosixPath) -> bool:
+    result = run_checked(
         file_rsync_command(config, source, destination),
         f"備份系統資料 {source.name}",
         attempts=3,
         retry_codes=frozenset({10, 12, 30, 35}),
+        capture_stdout=True,
     )
+    return rsync_output_has_changes(result.stdout)
 
 
 def sqlite_snapshot(source: Path, destination: Path) -> None:
@@ -283,9 +301,19 @@ def backup(config: BackupConfig) -> int:
         ]
         ensure_remote_directories(config, remote_directories)
 
+        updated_projects = 0
+        unchanged_projects = 0
         for index, project in enumerate(projects, 1):
             log(f"備份專案 {index}/{len(projects)}：{project.name}")
-            rsync_directory(config, project.source, project.destination)
+            if rsync_directory(config, project.source, project.destination):
+                updated_projects += 1
+            else:
+                unchanged_projects += 1
+
+        log(
+            f"專案備份統計：有更新 {updated_projects} 個，"
+            f"無更新 {unchanged_projects} 個，共 {len(projects)} 個"
+        )
 
         with tempfile.TemporaryDirectory(prefix="label-tool-db-backup-") as temporary:
             temporary_dir = Path(temporary)

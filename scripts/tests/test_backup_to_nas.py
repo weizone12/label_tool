@@ -17,6 +17,7 @@ from scripts.backup_to_nas import (
     file_rsync_command,
     group_components,
     run_checked,
+    rsync_output_has_changes,
     sanitize_component,
     sqlite_snapshot,
     validate_remote_root,
@@ -93,9 +94,17 @@ class BackupPathTests(unittest.TestCase):
                 self.assertFalse(any(argument.startswith("--delete") for argument in command))
                 self.assertNotIn("--remove-source-files", command)
                 self.assertIn("--rsync-path=/usr/bin/rsync", command)
+                self.assertIn("--itemize-changes", command)
+                self.assertIn("--out-format=CHANGE:%i", command)
                 remote_shell = command[command.index("-e") + 1]
                 self.assertIn("IdentitiesOnly=yes", remote_shell)
                 self.assertIn("ServerAliveInterval=30", remote_shell)
+
+    def test_rsync_change_output_distinguishes_updated_and_unchanged(self):
+        self.assertFalse(rsync_output_has_changes(""))
+        self.assertFalse(rsync_output_has_changes(None))
+        self.assertTrue(rsync_output_has_changes("CHANGE:>f++++++++++\n"))
+        self.assertTrue(rsync_output_has_changes("sending incremental file list\nCHANGE:.f..t......\n"))
 
 
 class DatabaseSnapshotTests(unittest.TestCase):
