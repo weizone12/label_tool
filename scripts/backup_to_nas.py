@@ -13,8 +13,9 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass
+import time
 from contextlib import closing
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 
@@ -125,6 +126,9 @@ def ssh_arguments(config: BackupConfig) -> list[str]:
         "ssh",
         "-o", "BatchMode=yes",
         "-o", "ConnectTimeout=15",
+        "-o", "IdentitiesOnly=yes",
+        "-o", "ServerAliveInterval=30",
+        "-o", "ServerAliveCountMax=6",
         "-p", str(config.port),
         "-i", str(config.identity_file),
     ]
@@ -134,13 +138,26 @@ def rsync_remote_shell(config: BackupConfig) -> str:
     return " ".join(shlex.quote(part) for part in ssh_arguments(config))
 
 
-def run_checked(command: list[str], description: str) -> None:
-    try:
-        subprocess.run(command, check=True)
-    except FileNotFoundError as error:
-        raise RuntimeError(f"缺少必要指令：{command[0]}") from error
-    except subprocess.CalledProcessError as error:
-        raise RuntimeError(f"{description}失敗（結束碼 {error.returncode}）") from error
+def run_checked(
+    command: list[str],
+    description: str,
+    *,
+    attempts: int = 1,
+    retry_codes: frozenset[int] = frozenset(),
+) -> None:
+    for attempt in range(1, attempts + 1):
+        try:
+            subprocess.run(command, check=True)
+            return
+        except FileNotFoundError as error:
+            raise RuntimeError(f"缺少必要指令：{command[0]}") from error
+        except subprocess.CalledProcessError as error:
+            if attempt < attempts and error.returncode in retry_codes:
+                delay = 5 * attempt
+                log(f"警告：{description}中斷（結束碼 {error.returncode}），{delay} 秒後重試 {attempt + 1}/{attempts}")
+                time.sleep(delay)
+                continue
+            raise RuntimeError(f"{description}失敗（結束碼 {error.returncode}）") from error
 
 
 def ensure_remote_directories(config: BackupConfig, directories: list[PurePosixPath]) -> None:
@@ -162,6 +179,7 @@ def directory_rsync_command(config: BackupConfig, source: Path, destination: Pur
         "-a",
         "--partial",
         "--protect-args",
+        "--rsync-path=/usr/bin/rsync",
         "-e", rsync_remote_shell(config),
         "--",
         source_with_separator,
@@ -170,7 +188,12 @@ def directory_rsync_command(config: BackupConfig, source: Path, destination: Pur
 
 
 def rsync_directory(config: BackupConfig, source: Path, destination: PurePosixPath) -> None:
-    run_checked(directory_rsync_command(config, source, destination), f"備份專案 {source.name}")
+    run_checked(
+        directory_rsync_command(config, source, destination),
+        f"備份專案 {source.name}",
+        attempts=3,
+        retry_codes=frozenset({10, 12, 30, 35}),
+    )
 
 
 def file_rsync_command(config: BackupConfig, source: Path, destination: PurePosixPath) -> list[str]:
@@ -181,6 +204,7 @@ def file_rsync_command(config: BackupConfig, source: Path, destination: PurePosi
         "--checksum",
         "--partial",
         "--protect-args",
+        "--rsync-path=/usr/bin/rsync",
         "-e", rsync_remote_shell(config),
         "--",
         str(source),
@@ -189,7 +213,12 @@ def file_rsync_command(config: BackupConfig, source: Path, destination: PurePosi
 
 
 def rsync_file(config: BackupConfig, source: Path, destination: PurePosixPath) -> None:
-    run_checked(file_rsync_command(config, source, destination), f"備份系統資料 {source.name}")
+    run_checked(
+        file_rsync_command(config, source, destination),
+        f"備份系統資料 {source.name}",
+        attempts=3,
+        retry_codes=frozenset({10, 12, 30, 35}),
+    )
 
 
 def sqlite_snapshot(source: Path, destination: Path) -> None:

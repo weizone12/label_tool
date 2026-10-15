@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import subprocess
 import tempfile
 import unittest
 from contextlib import closing
 from pathlib import Path, PurePosixPath
+from unittest.mock import patch
 
 from scripts.backup_to_nas import (
     BackupConfig,
@@ -14,6 +16,7 @@ from scripts.backup_to_nas import (
     discover_projects,
     file_rsync_command,
     group_components,
+    run_checked,
     sanitize_component,
     sqlite_snapshot,
     validate_remote_root,
@@ -89,6 +92,10 @@ class BackupPathTests(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertFalse(any(argument.startswith("--delete") for argument in command))
                 self.assertNotIn("--remove-source-files", command)
+                self.assertIn("--rsync-path=/usr/bin/rsync", command)
+                remote_shell = command[command.index("-e") + 1]
+                self.assertIn("IdentitiesOnly=yes", remote_shell)
+                self.assertIn("ServerAliveInterval=30", remote_shell)
 
 
 class DatabaseSnapshotTests(unittest.TestCase):
@@ -106,6 +113,21 @@ class DatabaseSnapshotTests(unittest.TestCase):
 
             with closing(sqlite3.connect(destination)) as database:
                 self.assertEqual(database.execute("SELECT value FROM records").fetchone()[0], "saved")
+
+
+class RetryTests(unittest.TestCase):
+    def test_protocol_error_is_retried(self):
+        failure = subprocess.CalledProcessError(12, ["rsync"])
+        with patch("scripts.backup_to_nas.subprocess.run", side_effect=[failure, None]) as run:
+            with patch("scripts.backup_to_nas.time.sleep") as sleep:
+                run_checked(
+                    ["rsync"],
+                    "備份測試",
+                    attempts=3,
+                    retry_codes=frozenset({12}),
+                )
+        self.assertEqual(run.call_count, 2)
+        sleep.assert_called_once_with(5)
 
 
 if __name__ == "__main__":

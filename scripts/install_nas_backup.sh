@@ -29,7 +29,15 @@ if [[ ! -f "$IDENTITY_FILE" ]]; then
   ssh-keygen -t ed25519 -N "" -C "label-tool NAS backup" -f "$IDENTITY_FILE"
 fi
 
-SSH_OPTIONS=(-o BatchMode=yes -o ConnectTimeout=15 -p "$NAS_PORT" -i "$IDENTITY_FILE")
+SSH_OPTIONS=(
+  -o BatchMode=yes
+  -o ConnectTimeout=15
+  -o IdentitiesOnly=yes
+  -o ServerAliveInterval=30
+  -o ServerAliveCountMax=6
+  -p "$NAS_PORT"
+  -i "$IDENTITY_FILE"
+)
 if ! ssh "${SSH_OPTIONS[@]}" "$NAS_USER@$NAS_HOST" true >/dev/null 2>&1; then
   echo "需要將備份金鑰加入 NAS；接下來請輸入一次 NAS 帳號密碼。"
   ssh-copy-id -i "$IDENTITY_FILE.pub" -p "$NAS_PORT" "$NAS_USER@$NAS_HOST"
