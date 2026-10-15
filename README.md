@@ -60,7 +60,7 @@ Ubuntu／Debian 安裝必要工具：
 
 ```bash
 sudo apt update
-sudo apt install -y python3-venv python3-pip curl util-linux
+sudo apt install -y python3-venv python3-pip curl util-linux openssh-client rsync
 ```
 
 Linux 的 `start.sh` 另外需要 `curl` 與 `setsid`。若出現 `Missing required command: curl`：
@@ -431,3 +431,60 @@ Linux 不支援伺服器端 Windows 原生檔案選擇視窗，但瀏覽器檔�
 ```text
 backend/data/projects/
 ```
+
+## 13. 每日備份至 Synology NAS
+
+Linux 主機可將專案、使用者帳號與專案權限備份至同區網 NAS。目前預設設定為：
+
+```text
+NAS：192.168.1.3:22
+帳號：admin
+根目錄：/volume1/label_tool_backup
+排程：每天 02:00（Asia/Taipei）
+```
+
+先在 Synology DSM 的「控制台 → 終端機和 SNMP」啟用 SSH，確認 `admin` 對 `/volume1/label_tool_backup` 有寫入權限，然後在 Linux 專案根目錄執行：
+
+```bash
+sudo apt install -y openssh-client rsync
+bash scripts/install_nas_backup.sh
+```
+
+安裝時會建立獨立 SSH 金鑰；第一次需要輸入一次 NAS 密碼，密碼不會寫入程式或排程。若電腦在使用者登出後仍須於凌晨 2:00 準時執行，再執行：
+
+```bash
+sudo loginctl enable-linger "$USER"
+```
+
+手動掃描並備份：
+
+```bash
+bash scripts/backup_to_nas.sh
+```
+
+只預覽專案會被放到哪些 NAS 路徑，不連線也不傳送：
+
+```bash
+bash scripts/backup_to_nas.sh --dry-run
+```
+
+查看排程與最近備份紀錄：
+
+```bash
+systemctl --user list-timers label-tool-nas-backup.timer
+journalctl --user -u label-tool-nas-backup.service -n 100 --no-pager
+```
+
+NAS 端會依各專案 `project.json` 的 `group` 建立資料夾，例如：
+
+```text
+/volume1/label_tool_backup/
+├── projects/
+│   ├── 父群組/子群組/專案名稱/
+│   └── 未分群/專案名稱/
+└── system/
+    ├── access_control.db
+    └── users.db
+```
+
+本機 `backend/data/projects/` 不會被移動或重新分群。備份使用不含刪除參數的 `rsync`：新增及修改會同步到 NAS，但本機刪除專案或檔案時，NAS 上的既有副本會保留。專案改名或移動群組後會建立新路徑，舊路徑也會保留。資料庫會先建立 SQLite 一致性快照，再傳送至 NAS。
