@@ -160,6 +160,8 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
   const [uploadStage, setUploadStage] = useState('media')
 
   const saveTimer = useRef(null)
+  const navigationInProgress = useRef(false)
+  const editorRef = useRef(null)
   const annotationCacheRef = useRef(new Map())
   const draftActiveRef = useRef(false)
   const finishInProgress = useRef(false)
@@ -177,6 +179,7 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
   const allImagesCompleted = images.length > 0 && images.every((item) => item.completed)
   const filteredImages = images.filter((item) => progressFilter === 'all' || (progressFilter === 'completed' ? item.completed : !item.completed))
   const currentImage = filteredImages[index] || filteredImages[0]
+  editorRef.current = { imageId: currentImage?.id, document }
   const nextImageToPreload = filteredImages[index + 1]
 
   const fetchAnnotation = useCallback((imageId) => {
@@ -243,14 +246,26 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
 
   const save = useCallback(async (payload = document) => {
     if (!currentImage) return null
+    const initialDocument = editorRef.current.document
     clearTimeout(saveTimer.current)
     setSaveState('儲存中…')
     try {
       const saved = await api.saveAnnotation(project.id, currentImage.id, payload)
-      setDocument((current) => ({ ...current, revision: saved.revision, updatedAt: saved.updatedAt }))
-      setSaveState('已儲存')
+      if (editorRef.current.imageId !== currentImage.id) return saved
+      if (editorRef.current.document === initialDocument) {
+        // Update the ref too so navigation can distinguish edits from server metadata.
+        const next = { ...payload, revision: saved.revision, updatedAt: saved.updatedAt }
+        editorRef.current.document = next
+        setDocument(next)
+        setSaveState('已儲存')
+      } else {
+        setSaveState('尚未儲存')
+      }
       return saved
-    } catch (err) { setSaveState('儲存失敗'); setError(err.message); return null }
+    } catch (err) {
+      if (editorRef.current.imageId === currentImage.id) { setSaveState('儲存失敗'); setError(err.message) }
+      return null
+    }
   }, [currentImage, document, project.id])
 
   const commit = useCallback((next) => {
@@ -355,14 +370,32 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
     pasteSelectedAnnotation()
   }, [annotationReady, currentImage?.id, pasteSelectedAnnotation])
 
+  const leaveImage = useCallback(async (action) => {
+    if (navigationInProgress.current || finishInProgress.current || updatingAllCompletion || saveState === '儲存中…') return
+    navigationInProgress.current = true
+    try {
+      if (currentImage && annotationReady && saveState !== '已儲存') {
+        const payload = document
+        const saved = await save(payload)
+        if (!saved) return
+        // Editing can continue while the request is in flight. Keep that work visible.
+        const latest = editorRef.current.document
+        if (['annotations', 'classifications', 'editor_state', 'completed'].some((key) => latest[key] !== payload[key])) return
+      }
+      clearTimeout(saveTimer.current)
+      action()
+    } finally {
+      navigationInProgress.current = false
+    }
+  }, [annotationReady, currentImage, document, save, saveState, updatingAllCompletion])
+
   const navigate = useCallback((delta) => {
-    if (!filteredImages.length || updatingAllCompletion) return
-    if (saveState === '尚未儲存') save()
-    setIndex((value) => Math.max(0, Math.min(filteredImages.length - 1, value + delta)))
-  }, [filteredImages.length, save, saveState, updatingAllCompletion])
+    if (!filteredImages.length) return
+    leaveImage(() => setIndex((value) => Math.max(0, Math.min(filteredImages.length - 1, value + delta))))
+  }, [filteredImages.length, leaveImage])
 
   const finishAndNext = useCallback(async () => {
-    if (!currentImage || finishInProgress.current || updatingAllCompletion) return
+    if (!currentImage || finishInProgress.current || navigationInProgress.current || updatingAllCompletion || saveState === '儲存中…') return
     finishInProgress.current = true
     try {
       const completedDocument = { ...document, completed: true }
@@ -379,7 +412,7 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
     } finally {
       finishInProgress.current = false
     }
-  }, [currentImage, document, filteredImages, progressFilter, save, updatingAllCompletion])
+  }, [currentImage, document, filteredImages, progressFilter, save, saveState, updatingAllCompletion])
 
   useEffect(() => {
     const isTextEditor = (target) => ['INPUT', 'TEXTAREA'].includes(target?.tagName) || target?.isContentEditable
@@ -1018,10 +1051,10 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
       )}
 
       <header className="workspace-header">
-        <div className="workspace-brand"><button className="icon-button" onClick={(event) => { event.stopPropagation(); onExit() }}><ArrowLeft size={19} /></button><div><strong>{project.name}</strong><span>{currentImage ? `${index + 1} / ${images.length} · ${mediaDisplayPath(currentImage)}` : '尚未載入圖片'}</span></div></div>
+        <div className="workspace-brand"><button className="icon-button" onClick={(event) => { event.stopPropagation(); leaveImage(onExit) }}><ArrowLeft size={19} /></button><div><strong>{project.name}</strong><span>{currentImage ? `${index + 1} / ${images.length} · ${mediaDisplayPath(currentImage)}` : '尚未載入圖片'}</span></div></div>
         <div className="workspace-actions">
-          <select className="progress-filter" value={progressFilter} disabled={updatingAllCompletion} onChange={(event) => { setProgressFilter(event.target.value); setIndex(0) }}><option value="all">全部資料</option><option value="pending">未完成</option><option value="completed">已完成</option></select>
-          {filteredImages.length > 0 && <label className="image-jump"><span>跳轉資料</span><select value={Math.max(0, filteredImages.findIndex((item) => item.id === currentImage?.id))} disabled={updatingAllCompletion} onChange={(event) => setIndex(Number(event.target.value))}>{filteredImages.map((item, imageIndex) => <option key={item.id} value={imageIndex}>{imageIndex + 1}. {mediaDisplayPath(item)}</option>)}</select></label>}
+          <select className="progress-filter" value={progressFilter} disabled={updatingAllCompletion} onChange={(event) => { const value = event.target.value; leaveImage(() => { setProgressFilter(value); setIndex(0) }) }}><option value="all">全部資料</option><option value="pending">未完成</option><option value="completed">已完成</option></select>
+          {filteredImages.length > 0 && <label className="image-jump"><span>跳轉資料</span><select value={Math.max(0, filteredImages.findIndex((item) => item.id === currentImage?.id))} disabled={updatingAllCompletion} onChange={(event) => { const value = Number(event.target.value); leaveImage(() => setIndex(value)) }}>{filteredImages.map((item, imageIndex) => <option key={item.id} value={imageIndex}>{imageIndex + 1}. {mediaDisplayPath(item)}</option>)}</select></label>}
           <button className="secondary-button compact" onClick={toggleCompleted} disabled={!currentImage || updatingAllCompletion}>{document.completed ? '取消完成' : '標記完成'}</button>
           <button className="secondary-button compact" onClick={toggleAllCompleted} disabled={!images.length || updatingAllCompletion}>{updatingAllCompletion ? '更新中…' : allImagesCompleted ? '全部取消完成' : '全部完成'}</button>
           {isAdmin && <button className="secondary-button compact" onClick={() => fileInputRef.current?.click()} disabled={uploading}><ImagePlus size={16} />新增檔案</button>}

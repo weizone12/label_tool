@@ -1,11 +1,13 @@
+import { fetchResponse, readJson } from './http.js'
+
 async function request(path, options = {}) {
   let csrfToken = ''
   if (options.method && ['POST', 'PUT', 'PATCH', 'DELETE'].includes(options.method)) {
-    const csrfResponse = await fetch('/api/auth/csrf', { credentials: 'same-origin' })
-    if (!csrfResponse.ok) throw new Error('無法取得 CSRF 權杖')
-    csrfToken = (await csrfResponse.json()).csrf_token
+    const csrfResponse = await fetchResponse('/api/auth/csrf')
+    if (!csrfResponse.ok) throw new Error(`無法取得 CSRF 權杖（${csrfResponse.status}）`)
+    csrfToken = (await readJson(csrfResponse, '/api/auth/csrf')).csrf_token
   }
-  const response = await fetch(path, {
+  const response = await fetchResponse(path, {
     credentials: 'same-origin',
     ...options,
     headers: { ...(options.headers || {}), ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}) },
@@ -16,7 +18,7 @@ async function request(path, options = {}) {
     throw new Error(message)
   }
   if (response.status === 204) return null
-  return response.json()
+  return readJson(response, path)
 }
 
 const geometryPoints = (annotation) => {
@@ -95,7 +97,7 @@ export const api = {
   }),
   deleteProject: (id) => request(`/api/projects/${id}`, { method: 'DELETE' }),
   downloadProject: async (id) => {
-    const response = await fetch(`/api/projects/${id}/download`, { credentials: 'same-origin' })
+    const response = await fetchResponse(`/api/projects/${id}/download`)
     if (!response.ok) {
       let message = `下載失敗（${response.status}）`
       try { message = (await response.json()).error || message } catch { /* noop */ }

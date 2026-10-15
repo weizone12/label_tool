@@ -1,6 +1,6 @@
 {
   "scheme": "http",
-  "publicHost": "192.168.55.58",
+  "publicHost": "192.168.1.2",
   "frontendBindHost": "0.0.0.0",
   "backendBindHost": "127.0.0.1",
   "labelFrontendPort": 5173,
