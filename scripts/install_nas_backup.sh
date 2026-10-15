@@ -65,10 +65,10 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-EnvironmentFile="$CONFIG_PATH"
+EnvironmentFile=$CONFIG_PATH
 Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-WorkingDirectory="$PROJECT_ROOT"
-ExecStart="$PYTHON_BIN" "$PROJECT_ROOT/scripts/backup_to_nas.py"
+WorkingDirectory=$PROJECT_ROOT
+ExecStart=$PYTHON_BIN $PROJECT_ROOT/scripts/backup_to_nas.py
 UMask=0077
 EOF
 
