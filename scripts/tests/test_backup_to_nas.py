@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 import sqlite3
 import subprocess
 import tempfile
@@ -12,14 +13,17 @@ from unittest.mock import patch
 from scripts.backup_to_nas import (
     BackupConfig,
     UNGROUPED_DIRECTORY,
+    backup,
     directory_rsync_command,
     discover_projects,
     file_rsync_command,
     group_components,
+    project_timestamp_paths,
     run_checked,
     rsync_output_has_changes,
     sanitize_component,
     sqlite_snapshot,
+    touch_remote_directories,
     validate_remote_root,
 )
 
@@ -99,12 +103,134 @@ class BackupPathTests(unittest.TestCase):
                 remote_shell = command[command.index("-e") + 1]
                 self.assertIn("IdentitiesOnly=yes", remote_shell)
                 self.assertIn("ServerAliveInterval=30", remote_shell)
+        self.assertIn("--omit-dir-times", commands[0])
+        self.assertNotIn("--omit-dir-times", commands[1])
 
     def test_rsync_change_output_distinguishes_updated_and_unchanged(self):
         self.assertFalse(rsync_output_has_changes(""))
         self.assertFalse(rsync_output_has_changes(None))
         self.assertTrue(rsync_output_has_changes("CHANGE:>f++++++++++\n"))
         self.assertTrue(rsync_output_has_changes("sending incremental file list\nCHANGE:.f..t......\n"))
+
+    def test_project_timestamp_paths_include_project_groups_and_projects_root(self):
+        projects_root = PurePosixPath("/volume1/label_tool_backup/projects")
+        destination = projects_root / "日期" / "Camera 1" / "專案 A"
+
+        self.assertEqual(
+            project_timestamp_paths(destination, projects_root),
+            [
+                destination,
+                projects_root / "日期" / "Camera 1",
+                projects_root / "日期",
+                projects_root,
+            ],
+        )
+
+    def test_touch_remote_directories_uses_absolute_touch_command(self):
+        config = BackupConfig(
+            host="192.168.1.3",
+            user="admin",
+            port=22,
+            remote_root=PurePosixPath("/volume1/label_tool_backup"),
+            identity_file=Path("backup-key"),
+            projects_dir=Path("projects"),
+            access_database=Path("access_control.db"),
+            users_database=Path("users.db"),
+        )
+        paths = [
+            config.remote_root / "projects" / "群組 A" / "專案 O'Reilly",
+            config.remote_root / "projects" / "群組 A",
+            config.remote_root / "projects",
+        ]
+
+        with patch("scripts.backup_to_nas.run_checked") as run:
+            touch_remote_directories(config, paths)
+
+        command = run.call_args.args[0]
+        self.assertEqual(command[-2], config.remote_target)
+        self.assertTrue(command[-1].startswith("/bin/touch -m "))
+        self.assertIn(shlex.quote(str(paths[0])), command[-1])
+        self.assertEqual(run.call_args.kwargs["attempts"], 3)
+
+
+class BackupSummaryTests(unittest.TestCase):
+    def test_only_changed_projects_are_listed_and_touched(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            projects_dir = Path(temporary) / "projects"
+            projects_dir.mkdir()
+            for directory_name, project_name in (("project-a", "專案 A"), ("project-b", "專案 B")):
+                source = projects_dir / directory_name
+                source.mkdir()
+                (source / "project.json").write_text(
+                    json.dumps({"name": project_name, "group": "群組"}, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+            config = BackupConfig(
+                host="192.168.1.3",
+                user="admin",
+                port=22,
+                remote_root=PurePosixPath("/volume1/label_tool_backup"),
+                identity_file=Path("backup-key"),
+                projects_dir=projects_dir,
+                access_database=Path(temporary) / "missing-access.db",
+                users_database=Path(temporary) / "missing-users.db",
+            )
+
+            with patch("scripts.backup_to_nas.log") as logger, \
+                    patch("scripts.backup_to_nas.verify_requirements"), \
+                    patch("scripts.backup_to_nas.acquire_lock") as acquire_lock, \
+                    patch("scripts.backup_to_nas.ensure_remote_directories"), \
+                    patch("scripts.backup_to_nas.rsync_directory", side_effect=[True, False]), \
+                    patch("scripts.backup_to_nas.touch_remote_directories") as touch:
+                self.assertEqual(backup(config), 0)
+
+        touch.assert_called_once()
+        touched_paths = touch.call_args.args[1]
+        self.assertEqual(touched_paths[-1], config.remote_root / "projects")
+        messages = [call.args[0] for call in logger.call_args_list]
+        self.assertIn("專案備份統計：有更新 1 個，無更新 1 個，共 2 個", messages)
+        self.assertIn(
+            "  - 專案 A（群組）→ /volume1/label_tool_backup/projects/群組/project-a",
+            messages,
+        )
+        self.assertNotIn(
+            "  - 專案 B（群組）→ /volume1/label_tool_backup/projects/群組/project-b",
+            messages,
+        )
+        acquire_lock.return_value.close.assert_called_once()
+
+    def test_unchanged_projects_do_not_touch_nas_dates(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            projects_dir = Path(temporary) / "projects"
+            source = projects_dir / "project-a"
+            source.mkdir(parents=True)
+            (source / "project.json").write_text(
+                json.dumps({"name": "專案 A", "group": "群組"}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            config = BackupConfig(
+                host="192.168.1.3",
+                user="admin",
+                port=22,
+                remote_root=PurePosixPath("/volume1/label_tool_backup"),
+                identity_file=Path("backup-key"),
+                projects_dir=projects_dir,
+                access_database=Path(temporary) / "missing-access.db",
+                users_database=Path(temporary) / "missing-users.db",
+            )
+
+            with patch("scripts.backup_to_nas.log") as logger, \
+                    patch("scripts.backup_to_nas.verify_requirements"), \
+                    patch("scripts.backup_to_nas.acquire_lock"), \
+                    patch("scripts.backup_to_nas.ensure_remote_directories"), \
+                    patch("scripts.backup_to_nas.rsync_directory", return_value=False), \
+                    patch("scripts.backup_to_nas.touch_remote_directories") as touch:
+                self.assertEqual(backup(config), 0)
+
+        touch.assert_not_called()
+        messages = [call.args[0] for call in logger.call_args_list]
+        self.assertIn("專案備份統計：有更新 0 個，無更新 1 個，共 1 個", messages)
+        self.assertIn("本次沒有專案需要更新", messages)
 
 
 class DatabaseSnapshotTests(unittest.TestCase):

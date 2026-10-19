@@ -177,12 +177,48 @@ def ensure_remote_directories(config: BackupConfig, directories: list[PurePosixP
         )
 
 
+def project_timestamp_paths(
+    destination: PurePosixPath,
+    projects_root: PurePosixPath,
+) -> list[PurePosixPath]:
+    try:
+        destination.relative_to(projects_root)
+    except ValueError as error:
+        raise ValueError(f"專案備份路徑不在 projects 目錄內：{destination}") from error
+    if destination == projects_root:
+        raise ValueError("專案備份路徑不可等於 projects 目錄")
+
+    paths = [destination]
+    current = destination.parent
+    while current != projects_root:
+        paths.append(current)
+        current = current.parent
+    paths.append(projects_root)
+    return paths
+
+
+def touch_remote_directories(config: BackupConfig, directories: list[PurePosixPath]) -> None:
+    # Touch children first so parent folders represent the latest successful
+    # project backup when a platform records sub-second timestamps.
+    unique = sorted({str(path) for path in directories}, key=lambda path: (-path.count("/"), path))
+    for index in range(0, len(unique), 40):
+        chunk = unique[index:index + 40]
+        remote_command = "/bin/touch -m " + " ".join(shlex.quote(path) for path in chunk)
+        run_checked(
+            [*ssh_arguments(config), config.remote_target, remote_command],
+            "更新 NAS 專案資料夾日期",
+            attempts=3,
+            retry_codes=frozenset({255}),
+        )
+
+
 def directory_rsync_command(config: BackupConfig, source: Path, destination: PurePosixPath) -> list[str]:
     source_with_separator = f"{source}{os.sep}"
     remote = f"{config.remote_target}:{destination}/"
     return [
         "rsync",
         "-a",
+        "--omit-dir-times",
         "--partial",
         "--protect-args",
         "--itemize-changes",
@@ -301,19 +337,31 @@ def backup(config: BackupConfig) -> int:
         ]
         ensure_remote_directories(config, remote_directories)
 
-        updated_projects = 0
+        updated_projects: list[ProjectBackup] = []
         unchanged_projects = 0
+        projects_root = config.remote_root / "projects"
         for index, project in enumerate(projects, 1):
             log(f"備份專案 {index}/{len(projects)}：{project.name}")
             if rsync_directory(config, project.source, project.destination):
-                updated_projects += 1
+                touch_remote_directories(
+                    config,
+                    project_timestamp_paths(project.destination, projects_root),
+                )
+                updated_projects.append(project)
             else:
                 unchanged_projects += 1
 
         log(
-            f"專案備份統計：有更新 {updated_projects} 個，"
+            f"專案備份統計：有更新 {len(updated_projects)} 個，"
             f"無更新 {unchanged_projects} 個，共 {len(projects)} 個"
         )
+        if updated_projects:
+            log("本次有更新的專案：")
+            for project in updated_projects:
+                group_label = project.group or UNGROUPED_DIRECTORY
+                log(f"  - {project.name}（{group_label}）→ {project.destination}")
+        else:
+            log("本次沒有專案需要更新")
 
         with tempfile.TemporaryDirectory(prefix="label-tool-db-backup-") as temporary:
             temporary_dir = Path(temporary)
