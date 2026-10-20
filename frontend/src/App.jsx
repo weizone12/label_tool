@@ -140,8 +140,9 @@ export default function App() {
           {childGroups.map((groupName) => {
             const grouped = filteredByUser.filter((project) => isWithinPath(project.group, groupName))
             const imageCount = grouped.reduce((total, project) => total + (project.imageCount || 0), 0)
+            const completed = grouped.length > 0 && grouped.every((project) => project.completed)
             return <article className="project-card group-card" key={groupName} onClick={() => setActiveGroup(groupName)}>
-              <div className="project-card-top"><span>{grouped.length} 個專案 · {imageCount} 張圖片</span><Folder size={18} /></div>
+              <div className="project-card-top"><span>{grouped.length} 個專案 · {imageCount} 張圖片</span><div className="project-card-actions">{completed && <span className="project-complete-badge"><CheckCircle2 size={14} />已完成</span>}<Folder size={18} /></div></div>
               <h2>{groupSegments(groupName).at(-1)}</h2>
               <div className="group-card-open">開啟群組<ChevronRight size={17} /></div>
               <small>更新於 {new Date(Math.max(...grouped.map((project) => new Date(project.updatedAt).getTime()))).toLocaleString('zh-TW')}</small>
