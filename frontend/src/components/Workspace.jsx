@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { ArrowLeft, Check, ChevronLeft, ChevronRight, Copy, Download, Eye, EyeOff, FolderOpen, ImagePlus, Lock, Pencil, RotateCcw, Save, Trash2, Unlock, X } from 'lucide-react'
+import { ArrowLeft, Check, ChevronLeft, ChevronRight, Copy, Download, Eye, EyeOff, FolderOpen, ImagePlus, Link2, Lock, Pencil, RotateCcw, Save, Trash2, Unlink2, Unlock, X } from 'lucide-react'
 import { api } from '../api'
 import AnnotationCanvas from './AnnotationCanvas'
 import { createId } from '../uuid'
@@ -141,6 +141,7 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
   const [copiedMmsi, setCopiedMmsi] = useState('')
   const [aisSourceName, setAisSourceName] = useState('')
   const [showReidInfo, setShowReidInfo] = useState(true)
+  const [syncReidIds, setSyncReidIds] = useState(false)
   const [sharedCameraId, setSharedCameraId] = useState('')
   const [cameraRangeStart, setCameraRangeStart] = useState('1')
   const [cameraRangeEnd, setCameraRangeEnd] = useState('1')
@@ -487,6 +488,9 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
       : item)
     return { ...current, annotations: tool === 'reid' ? regenerateReidAnnotations(annotations, currentImage?.width, currentImage?.height) : annotations }
   })
+  const updateSelectedReidLid = (value) => updateSelected(syncReidIds
+    ? { track_id: value, identity_id: value }
+    : { track_id: value })
 
   useEffect(() => {
     if (selected?.type === 'ocr') setTimeout(() => ocrInputRef.current?.focus(), 0)
@@ -503,11 +507,13 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
     const selectedAnnotation = document.annotations.find((item) => item.id === selectedId && item.type === 'reid')
     if (!selectedAnnotation) return
     window.requestAnimationFrame(() => {
-      const input = String(selectedAnnotation.track_id ?? '').trim() ? reidGidInputRef.current : reidLidInputRef.current
+      const input = syncReidIds || !String(selectedAnnotation.track_id ?? '').trim()
+        ? reidLidInputRef.current
+        : reidGidInputRef.current
       input?.focus()
       input?.select()
     })
-  }, [reidEditOnly, selectedId])
+  }, [reidEditOnly, selectedId, syncReidIds])
 
   const importImageBboxSets = async (bboxSets, aisFiles, uploadedRecords) => {
     if (!bboxSets.length) return
@@ -1031,7 +1037,7 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
 
   const selectionEditor = selected && <section ref={selectedEditorRef} className="selection-editor"><div className="selection-title"><span className="panel-label">選取項目</span>{!reidEditOnly && <div><button className="icon-button" title={selected.hidden ? '顯示' : '隱藏'} onClick={() => updateSelected({ hidden: !selected.hidden })}>{selected.hidden ? <EyeOff size={15} /> : <Eye size={15} />}</button><button className="icon-button" title={selected.locked ? '解鎖' : '鎖定'} onClick={() => updateSelected({ locked: !selected.locked })}>{selected.locked ? <Lock size={15} /> : <Unlock size={15} />}</button><button className="icon-button danger" onClick={deleteSelected}><Trash2 size={15} /></button></div>}</div>
     {selected.type !== 'ocr' && <label className="field small"><span>Label</span><select value={selected.labelId} onChange={(e) => updateSelected({ labelId: e.target.value })}>{project.labels.filter((label) => !label.system).map((label) => <option key={label.id} value={label.id}>{label.name}</option>)}</select></label>}
-    {selected.type === 'reid' && <><label className="field small"><span>Identity ID（GID／跨圖片身分）</span><input ref={reidGidInputRef} value={selected.identity_id || ''} onChange={(e) => updateSelected({ identity_id: e.target.value })} placeholder="例如 person_001" /></label><label className="field small"><span>Track ID（LID／同影片軌跡）</span><input ref={reidLidInputRef} value={selected.track_id || ''} onChange={(e) => updateSelected({ track_id: e.target.value })} /></label><label className="field small"><span>Camera ID</span><input value={selected.camera_id || ''} onChange={(e) => updateSelected({ camera_id: e.target.value })} /></label><label className="field small"><span>Video ID</span><input value={selected.video_id || ''} onChange={(e) => updateSelected({ video_id: e.target.value })} /></label>{currentImage?.mediaType === 'video' && <label className="field small"><span>Frame ID</span><input value={selected.frame_id ?? ''} readOnly /></label>}{currentImage?.mediaType === 'video' && !reidEditOnly && <label className="classification-toggle"><input type="checkbox" checked={Boolean(selected.keyframe)} onChange={(e) => updateSelected({ keyframe: e.target.checked })} /><span><strong>關鍵影格</strong><small>此框為追蹤軌跡的明確標註點</small></span></label>}</>}
+    {selected.type === 'reid' && <><label className="field small"><span>Identity ID（GID／跨圖片身分）</span><input ref={reidGidInputRef} className={syncReidIds ? 'linked-id-input' : ''} value={selected.identity_id || ''} onChange={(e) => updateSelected({ identity_id: e.target.value })} placeholder={syncReidIds ? '由 LID 同步輸入' : '例如 person_001'} readOnly={syncReidIds} /></label><label className="field small"><span>Track ID（LID／同影片軌跡）{syncReidIds ? ' · 同步 GID' : ''}</span><input ref={reidLidInputRef} value={selected.track_id || ''} onChange={(e) => updateSelectedReidLid(e.target.value)} /></label><label className="field small"><span>Camera ID</span><input value={selected.camera_id || ''} onChange={(e) => updateSelected({ camera_id: e.target.value })} /></label><label className="field small"><span>Video ID</span><input value={selected.video_id || ''} onChange={(e) => updateSelected({ video_id: e.target.value })} /></label>{currentImage?.mediaType === 'video' && <label className="field small"><span>Frame ID</span><input value={selected.frame_id ?? ''} readOnly /></label>}{currentImage?.mediaType === 'video' && !reidEditOnly && <label className="classification-toggle"><input type="checkbox" checked={Boolean(selected.keyframe)} onChange={(e) => updateSelected({ keyframe: e.target.checked })} /><span><strong>關鍵影格</strong><small>此框為追蹤軌跡的明確標註點</small></span></label>}</>}
     {selectedLabel?.attributes.map((attribute) => <label className="field small" key={attribute.id}><span>{attribute.name}</span><input ref={selected.type === 'ocr' && attribute.id === 'transcription' ? ocrInputRef : null} type={attribute.type === 'number' ? 'number' : 'text'} value={selected.attributes?.[attribute.id] ?? ''} onChange={(e) => updateSelected({ attributes: { ...selected.attributes, [attribute.id]: attribute.type === 'number' ? (e.target.value === '' ? null : Number(e.target.value)) : e.target.value } })} placeholder={selected.type === 'ocr' ? '輸入框內文字' : ''} /></label>)}
   </section>
 
@@ -1071,6 +1077,7 @@ export default function Workspace({ project: initialProject, isAdmin, onExit }) 
           <div className="tool-divider" />
           <button className="tool-button" onClick={() => setResetToken((value) => value + 1)}><RotateCcw size={19} /><span>重設視角 R</span></button>
           {tool === 'reid' && <button className={`tool-button ${showReidInfo ? 'active' : ''}`} onClick={() => setShowReidInfo((value) => !value)}>{showReidInfo ? <Eye size={19} /> : <EyeOff size={19} />}<span>{showReidInfo ? '隱藏 ID 資訊' : '顯示 ID 資訊'}</span></button>}
+          {tool === 'reid' && <button type="button" className={`tool-button ${syncReidIds ? 'active' : ''}`} aria-pressed={syncReidIds} title={syncReidIds ? '共同輸入已開啟：修改 LID 時會同步修改 GID' : '共同輸入已關閉：LID 與 GID 分開輸入'} onClick={() => setSyncReidIds((value) => !value)}>{syncReidIds ? <Link2 size={19} /> : <Unlink2 size={19} />}<span>{syncReidIds ? '共同輸入 開' : '共同輸入 關'}</span></button>}
           <button className="tool-button" disabled={downloading} onClick={async () => {
             setDownloading(true); setError('')
             try { await api.downloadProject(project.id) }
