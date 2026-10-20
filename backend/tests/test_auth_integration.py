@@ -110,6 +110,59 @@ class AuthIntegrationTestCase(unittest.TestCase):
             count = db.execute("SELECT COUNT(*) FROM project_assignments").fetchone()[0]
         self.assertEqual(count, 1)
 
+    def test_admin_can_replace_assignments_for_multiple_projects(self):
+        from project_access import connection
+
+        admin = {"id": "admin-id", "username": "admin", "is_admin": True,
+                 "status": "active", "must_change_password": False}
+        user = {"id": "user-id", "username": "worker", "is_admin": False,
+                "status": "active", "must_change_password": False}
+        active_user = admin
+
+        def verify(_request, timeout=None):
+            return FakeAuthResponse(active_user)
+
+        with patch("auth_integration.urllib.request.urlopen", side_effect=verify):
+            first = self.client.post("/api/projects", json={
+                "name": "first", "group": "日期 / 批次", "primaryMode": "rectangle", "labels": [],
+            }, headers={"X-CSRF-Token": "csrf"}).get_json()
+            second = self.client.post("/api/projects", json={
+                "name": "second", "group": "日期 / 批次", "primaryMode": "rectangle", "labels": [],
+            }, headers={"X-CSRF-Token": "csrf"}).get_json()
+            outside = self.client.post("/api/projects", json={
+                "name": "outside", "group": "其他", "primaryMode": "rectangle", "labels": [],
+            }, headers={"X-CSRF-Token": "csrf"}).get_json()
+
+            response = self.client.put("/api/projects/assignments/bulk", json={
+                "project_ids": [first["id"], second["id"], first["id"]],
+                "user_ids": [user["id"], user["id"]],
+            }, headers={"X-CSRF-Token": "csrf"})
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.get_json(), {
+                "project_ids": [first["id"], second["id"]],
+                "user_ids": [user["id"]],
+            })
+
+            listed = {project["id"]: project for project in self.client.get("/api/projects").get_json()}
+            self.assertEqual(listed[first["id"]]["assignedUserIds"], [user["id"]])
+            self.assertEqual(listed[second["id"]]["assignedUserIds"], [user["id"]])
+            self.assertEqual(listed[outside["id"]]["assignedUserIds"], [])
+
+            active_user = user
+            forbidden = self.client.put("/api/projects/assignments/bulk", json={
+                "project_ids": [first["id"]], "user_ids": [],
+            }, headers={"X-CSRF-Token": "csrf"})
+            self.assertEqual(forbidden.status_code, 403)
+
+        with connection() as db:
+            assignments = db.execute(
+                "SELECT project_id, user_id FROM project_assignments ORDER BY project_id"
+            ).fetchall()
+        self.assertEqual(
+            [(row["project_id"], row["user_id"]) for row in assignments],
+            sorted([(first["id"], user["id"]), (second["id"], user["id"])]),
+        )
+
     def test_only_admin_can_replace_reid_source_state(self):
         admin = {"id": "admin-id", "username": "admin", "is_admin": True,
                  "status": "active", "must_change_password": False}

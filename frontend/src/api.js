@@ -87,6 +87,9 @@ export const api = {
   updateAssignments: async (id, userIds) => (await request(`/api/projects/${id}/assignments`, {
     method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ user_ids: userIds }),
   })).user_ids,
+  updateGroupAssignments: (projectIds, userIds) => request('/api/projects/assignments/bulk', {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ project_ids: projectIds, user_ids: userIds }),
+  }),
   listProjects: () => request('/api/projects'),
   reconcileProjects: () => request('/api/projects/reconcile', { method: 'POST' }),
   createProject: (data) => request('/api/projects', {

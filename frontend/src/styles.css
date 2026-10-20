@@ -202,6 +202,8 @@ h1, h2, p { margin-top: 0; }
 .assignment-dialog { width: min(500px, 100%); max-height: 80vh; overflow: auto; border: 1px solid var(--border); border-radius: 14px; background: var(--panel); padding: 24px; box-shadow: 0 24px 80px rgba(0,0,0,.45); }
 .assignment-dialog h2 { margin: 0 0 5px; }
 .assignment-dialog > p { margin: 0 0 18px; color: var(--muted); }
+.assignment-note { margin: -7px 0 18px; border: 1px solid rgba(45,212,191,.3); border-radius: 7px; background: rgba(45,212,191,.08); color: #99f6e4; padding: 9px 11px; font-size: 12px; line-height: 1.5; }
+.assignment-note.warning { border-color: rgba(245,158,11,.38); background: rgba(245,158,11,.09); color: #fcd34d; }
 .assignment-users { display: grid; gap: 8px; margin-bottom: 18px; }
 .assignment-users > label { display: flex; align-items: center; gap: 12px; padding: 11px; border: 1px solid var(--border); border-radius: 8px; cursor: pointer; }
 .assignment-users > label span { display: grid; gap: 2px; }

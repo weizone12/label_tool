@@ -28,6 +28,7 @@ export default function App() {
   const [creating, setCreating] = useState(false)
   const [error, setError] = useState('')
   const [assigning, setAssigning] = useState(null)
+  const [assigningGroup, setAssigningGroup] = useState(null)
   const [loggingOut, setLoggingOut] = useState(false)
   const [reconciling, setReconciling] = useState(false)
   const [notice, setNotice] = useState('')
@@ -139,10 +140,13 @@ export default function App() {
         ) : filteredByUser.length === 0 ? <div className="empty-state"><Users size={42} /><strong>沒有符合此篩選的專案</strong><span>請選擇其他使用者或查看全部專案</span></div> : <>
           {childGroups.map((groupName) => {
             const grouped = filteredByUser.filter((project) => isWithinPath(project.group, groupName))
+            const allGrouped = projects.filter((project) => isWithinPath(project.group, groupName))
+            const groupDepth = groupSegments(groupName).length
+            const isLeafGroup = allGrouped.length > 0 && allGrouped.every((project) => groupSegments(project.group).length === groupDepth)
             const imageCount = grouped.reduce((total, project) => total + (project.imageCount || 0), 0)
             const completed = grouped.length > 0 && grouped.every((project) => project.completed)
             return <article className="project-card group-card" key={groupName} onClick={() => setActiveGroup(groupName)}>
-              <div className="project-card-top"><span>{grouped.length} 個專案 · {imageCount} 張圖片</span><div className="project-card-actions">{completed && <span className="project-complete-badge"><CheckCircle2 size={14} />已完成</span>}<Folder size={18} /></div></div>
+              <div className="project-card-top"><span>{grouped.length} 個專案 · {imageCount} 張圖片</span><div className="project-card-actions">{completed && <span className="project-complete-badge"><CheckCircle2 size={14} />已完成</span>}{user.is_admin && isLeafGroup && <button className="icon-button" title="指派群組內全部專案" onClick={(event) => { event.stopPropagation(); setAssigningGroup({ name: groupName, projects: allGrouped }) }}><Users size={16} /></button>}<Folder size={18} /></div></div>
               <h2>{groupSegments(groupName).at(-1)}</h2>
               <div className="group-card-open">開啟群組<ChevronRight size={17} /></div>
               <small>更新於 {new Date(Math.max(...grouped.map((project) => new Date(project.updatedAt).getTime()))).toLocaleString('zh-TW')}</small>
@@ -153,6 +157,7 @@ export default function App() {
         </>}
       </section>
       {assigning && <AssignmentDialog project={assigning} onClose={() => setAssigning(null)} onSaved={(userIds) => setProjects((items) => items.map((project) => project.id === assigning.id ? { ...project, assignedUserIds: userIds } : project))} />}
+      {assigningGroup && <AssignmentDialog group={assigningGroup} onClose={() => setAssigningGroup(null)} onSaved={(userIds) => { const projectIds = new Set(assigningGroup.projects.map((project) => project.id)); setProjects((items) => items.map((project) => projectIds.has(project.id) ? { ...project, assignedUserIds: userIds } : project)) }} />}
     </main>
   )
 }

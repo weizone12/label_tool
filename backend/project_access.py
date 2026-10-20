@@ -137,3 +137,38 @@ def replace_assignments(project_id: str):
             [(project_id, user_id, now, g.current_user["id"]) for user_id in dict.fromkeys(user_ids)],
         )
     return jsonify({"user_ids": list(dict.fromkeys(user_ids))})
+
+
+@access_blueprint.put("/api/projects/assignments/bulk")
+def replace_bulk_assignments():
+    if not g.current_user.get("is_admin"):
+        return jsonify({"error": "權限不足"}), 403
+    body = request.get_json(silent=True) or {}
+    project_ids = body.get("project_ids")
+    user_ids = body.get("user_ids")
+    if (
+        not isinstance(project_ids, list)
+        or not project_ids
+        or not all(isinstance(value, str) and value for value in project_ids)
+    ):
+        return jsonify({"error": "project_ids 必須是非空的專案 ID 陣列"}), 400
+    if not isinstance(user_ids, list) or not all(isinstance(value, str) and value for value in user_ids):
+        return jsonify({"error": "user_ids 必須是使用者 ID 陣列"}), 400
+
+    unique_project_ids = list(dict.fromkeys(project_ids))
+    unique_user_ids = list(dict.fromkeys(user_ids))
+    now = datetime.now(timezone.utc).isoformat()
+    with connection() as db:
+        db.executemany(
+            "DELETE FROM project_assignments WHERE project_id = ?",
+            [(project_id,) for project_id in unique_project_ids],
+        )
+        db.executemany(
+            "INSERT INTO project_assignments (project_id, user_id, assigned_at, assigned_by) VALUES (?, ?, ?, ?)",
+            [
+                (project_id, user_id, now, g.current_user["id"])
+                for project_id in unique_project_ids
+                for user_id in unique_user_ids
+            ],
+        )
+    return jsonify({"project_ids": unique_project_ids, "user_ids": unique_user_ids})
