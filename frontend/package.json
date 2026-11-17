@@ -10,11 +10,11 @@
   },
   "dependencies": {
     "@vitejs/plugin-react": "latest",
-    "vite": "latest",
-    "typescript": "latest",
+    "lucide-react": "latest",
     "react": "latest",
     "react-dom": "latest",
-    "lucide-react": "latest"
+    "typescript": "latest",
+    "vite": "8.3.7"
   },
   "devDependencies": {
     "@eslint/js": "latest",
@@ -24,4 +24,3 @@
     "globals": "latest"
   }
 }
-
